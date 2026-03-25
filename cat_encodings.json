@@ -1,0 +1,67 @@
+{
+  "issuerCountryCode": {
+    "ARE": 0,
+    "GBR": 1,
+    "IND": 2,
+    "SGP": 3,
+    "USA": 4
+  },
+  "merchant_category": {
+    "Clothing": 0,
+    "Computer Network": 1,
+    "Crypto Exchange": 2,
+    "Digital Goods": 3,
+    "Electronics": 4,
+    "Gaming/Gambling": 5,
+    "Gift Cards": 6,
+    "Grocery": 7,
+    "Hotels": 8,
+    "Jewelry": 9,
+    "Restaurants": 10,
+    "Retail": 11
+  },
+  "deviceChannel": {
+    "API": 0,
+    "APP": 1,
+    "WEB": 2
+  },
+  "ip_country_long": {
+    "Brazil": 0,
+    "China": 1,
+    "Germany": 2,
+    "India": 3,
+    "Netherlands": 4,
+    "Nigeria": 5,
+    "Russia": 6,
+    "Singapore": 7,
+    "Turkey": 8,
+    "Ukraine": 9,
+    "United States": 10
+  },
+  "authenticationType": {
+    "challenge_failed": 0,
+    "challenge_success": 1,
+    "decoupled_success": 2,
+    "frictionless_success": 3,
+    "not_attempted": 4
+  },
+  "challenge_type": {
+    "OTP": 0,
+    "biometric": 1,
+    "failed_otp": 2,
+    "none": 3,
+    "timeout": 4
+  },
+  "browser_device_type": {
+    "desktop": 0,
+    "mobile": 1,
+    "tablet": 2
+  },
+  "purchase_currency_code": {
+    "AED": 0,
+    "GBP": 1,
+    "INR": 2,
+    "SGD": 3,
+    "USD": 4
+  }
+}
