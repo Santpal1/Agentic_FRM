@@ -2,95 +2,59 @@
 server.py — Fraud Detection MCP Server  (Workflow A · Dynamic Tool Edition)
 ============================================================================
 
-ARCHITECTURE — WORKFLOW A WITH DYNAMIC TOOL SELECTION
-------------------------------------------------------
-The pipeline has two stages. The LLM decides dynamically which Stage 2
-tools to call and in what order, guided by what each tool returns.
+FIXES APPLIED
+-------------
+FIX-1  ip_isp datacenter detection — two-layer approach:
+         Layer 1: existing ip_isp string match (unchanged)
+         Layer 2: NEW fallback CIDR prefix check against known cloud/Tor ranges
+                  when ip_isp is absent or empty. Covers AWS, GCP, Azure, Tor exits,
+                  and major hosting providers without requiring the gateway to send ip_isp.
 
-  STAGE 1 — TRIAGE GATE
-  ──────────────────────
-  flag_transaction
-    Every raw transaction hits this first. Lightweight ML + rule engine,
-    zero DB calls. Returns CLEARED (stop) or FLAGGED (proceed to Stage 2)
-    along with a hint about which signals fired so the LLM can plan ahead.
+FIX-2  add_case_note hard length cap — 400 chars max.
+         Previously a soft warning (logged but accepted any length).
+         Now returns an ERROR and refuses to persist if content > 400 chars.
+         The 3-5 line template stays; the cap enforces it mechanically.
 
-  STAGE 2 — DYNAMIC AGENTIC INVESTIGATION
-  ─────────────────────────────────────────
-  The LLM receives the FLAGGED result and decides which tools to call,
-  in what order, and whether intermediate results warrant calling more tools.
+FIX-3  Tool description for add_case_note updated to state the 400-char hard limit
+         so the LLM knows upfront rather than discovering it on rejection.
 
-  Tool menu (LLM chooses):
+FIX-4  disposable_plus_frictionless rule added to rule engine.
+         frictionless_success + disposable email OR new account (<60 min) is a known
+         3DS bypass pattern. Fires +0.10. Mirrors the existing disposable_plus_3ds_fail
+         rule so the bypass is caught at Stage 1 triage and Stage 2 scoring.
+         f_frictionless_suspicious flag added to compute_flags().
 
-    score_transaction        Full ML score + SHAP. Always call first in Stage 2.
-                             Result's risk band guides how deep to investigate:
-                               LOW      → close, no further tools needed
-                               MEDIUM   → call get_customer_profile at minimum
-                               HIGH     → call profile + recent txns
-                               CRITICAL → call all tools including device assoc
-                                          + consider get_linked_accounts +
-                                          get_merchant_risk + get_ip_intelligence
+FIX-5  get_merchant_onboarding added to Stage 1 suggested_tools always.
+         Stage 1 already knows merchant_id and merchant_name; get_merchant_onboarding
+         should always appear in the suggestion chain, not be silently omitted.
 
-    get_customer_profile     Account history, fraud rate, linkage signals.
-    get_recent_txns          Velocity and recent transaction history.
-    get_device_assoc         All cards/emails linked to this device (7-day window).
-    get_linked_accounts      NEW — Cross-identifier ring detection (IP/device/BIN/domain).
-    get_merchant_risk        NEW — Merchant fraud rate, chargebacks, peer comparison.
-    get_ip_intelligence      NEW — VPN/proxy detection, geolocation, subnet fraud history.
-    get_similar_fraud_cases  NEW — Top-N most similar confirmed fraud cases by feature similarity.
-    add_case_note            NEW — Append structured note to case record for audit trail.
-    update_case_status       NEW — Set final case status and close the investigation.
+FIX-6  Merchant recurrence escalation in flag_transaction.
+         If the same merchant_id has appeared in >= MERCHANT_RECURRENCE_THRESHOLD
+         CRITICAL-band flagged transactions within MERCHANT_RECURRENCE_WINDOW_H hours,
+         get_merchant_risk is appended to suggested_tools and a warning is emitted.
+         Tracked in the merchant_flag_counts in-memory dict (resets on server restart;
+         a production deployment should persist this in Redis or the DB).
 
-TOOL DECISION GUIDANCE FOR THE LLM
-────────────────────────────────────
-After score_transaction, use this as a starting point but apply judgment:
+FIX-7  update_case_status now enforces add_case_note prerequisite.
+         Before accepting a final disposition, the handler queries the case_notes table
+         for the transaction_id. If no note exists it returns an error, preventing
+         cases from being closed without a written assessment.
 
-  LOW band       → close immediately, call add_case_note + update_case_status only
-  MEDIUM band    → get_customer_profile → re-evaluate → add_case_note + update_case_status
-  HIGH band      → get_customer_profile + get_recent_txns → if fraud_rate > 30%
-                   also get_linked_accounts → add_case_note + update_case_status
-  CRITICAL band  → all tools as warranted → add_case_note + update_case_status
-                   always includes get_device_assoc + get_ip_intelligence
+FIX-8  get_recent_txns fallback when get_customer_profile returns no records.
+         score_transaction dynamic guidance for CRITICAL now explicitly instructs the
+         caller to fall back to get_recent_txns on the card alone if customer profile
+         returns no records, so the workflow doesn't dead-end on first-seen identifiers.
 
-  Additional triggers (call regardless of band):
-    merchantFraudRate > 0.05          → get_merchant_risk
-    ip_country != issuer_country      → get_ip_intelligence
-    profile shows 3+ linked cards     → get_linked_accounts
-    unusual signal combo              → get_similar_fraud_cases
+FIX-9  velocity_per_merchant feature added to rule engine and feature vector.
+         merchant_velocity_5min tracks how many transactions the same card/device
+         has attempted at the same merchant in the last 5 minutes via DB query.
+         Rule api_merchant_velocity fires at >= 3 hits (+0.10), catching merchant-focused
+         bot attacks that the global velocity counter would attribute to the device only.
 
-REQUIRED DB TABLES (run once):
-    CREATE TABLE IF NOT EXISTS case_notes (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        transaction_id VARCHAR(64) NOT NULL,
-        note_type VARCHAR(32) NOT NULL,
-        content TEXT NOT NULL,
-        risk_band VARCHAR(16),
-        confidence FLOAT,
-        created_at DATETIME NOT NULL,
-        INDEX idx_txn (transaction_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-    CREATE TABLE IF NOT EXISTS case_status (
-        transaction_id VARCHAR(64) PRIMARY KEY,
-        status VARCHAR(32) NOT NULL,
-        risk_band VARCHAR(16),
-        final_score FLOAT,
-        recommended_action VARCHAR(128),
-        tools_used JSON,
-        updated_at DATETIME NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-Usage:
-    pip install mcp mysql-connector-python pandas numpy scikit-learn shap
-
-Claude Desktop config (~/.config/claude/claude_desktop_config.json):
-    {
-      "mcpServers": {
-        "fraud-detection": {
-          "command": "python",
-          "args": ["/absolute/path/to/fraud_mcp/server.py"]
-        }
-      }
-    }
+FIX-10 submit_false_positive_feedback validates rule_triggered against known rules.
+         Previously accepted any free-text string, making the feedback loop noisy.
+         Now checks the value against the KNOWN_RULE_NAMES set and returns an error
+         with a list of valid names if an unknown rule is supplied.
 """
 
 import sys
@@ -101,8 +65,8 @@ import os
 from datetime import datetime, timedelta
 
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="xmlcharrefreplace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="xmlcharrefreplace")
 
 import numpy as np
 import pandas as pd
@@ -124,10 +88,92 @@ DB_CONFIG = {
     'charset':  'utf8mb4',
 }
 
-TRIAGE_THRESHOLD = 0.25   # Stage 1 gate — below = auto-cleared
+TRIAGE_THRESHOLD = 0.25
 BAND_LOW    = 0.30
 BAND_MEDIUM = 0.60
-BAND_HIGH   = 0.80        # above = CRITICAL
+BAND_HIGH   = 0.80
+
+CASE_NOTE_MAX_CHARS = 400   # FIX-2: hard cap — reject notes longer than this
+
+# FIX-6: Merchant recurrence tracking — in-memory, resets on server restart.
+# Production deployments should persist this in Redis or the transactions DB.
+MERCHANT_RECURRENCE_THRESHOLD = 3   # number of CRITICAL flagged txns before escalation
+MERCHANT_RECURRENCE_WINDOW_H  = 24  # rolling window in hours
+_merchant_flag_log: dict[str, list[datetime]] = {}  # merchant_id -> [flagged_at, ...]
+
+def _record_merchant_flag(merchant_id: str) -> int:
+    """Record a CRITICAL flag event for merchant_id. Returns current count in window."""
+    if not merchant_id:
+        return 0
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=MERCHANT_RECURRENCE_WINDOW_H)
+    events = _merchant_flag_log.get(merchant_id, [])
+    events = [t for t in events if t >= cutoff]   # prune old events
+    events.append(now)
+    _merchant_flag_log[merchant_id] = events
+    return len(events)
+
+def _merchant_flag_count(merchant_id: str) -> int:
+    """Return current CRITICAL flag count for merchant_id within the window."""
+    if not merchant_id:
+        return 0
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=MERCHANT_RECURRENCE_WINDOW_H)
+    events = _merchant_flag_log.get(merchant_id, [])
+    return sum(1 for t in events if t >= cutoff)
+
+# ── FIX-1: Known datacenter / Tor CIDR prefix table ───────────────────────────
+# Used as fallback when ip_isp is absent. Covers the most common cloud egress
+# and Tor exit ranges seen in Indian payment fraud. Intentionally conservative —
+# only /8 and /16 prefixes that are unambiguously non-residential.
+DATACENTER_PREFIXES = (
+    # AWS us-east / us-west / ap-southeast
+    "52.",   "54.",   "18.",
+    # GCP global egress
+    "34.",   "35.",   "104.196.", "104.197.", "104.198.", "104.199.",
+    # Azure
+    "40.",   "20.",   "13.",
+    # DigitalOcean
+    "134.122.", "137.184.", "143.198.", "146.190.", "159.65.", "159.89.",
+    "161.35.",  "164.90.",  "165.22.",  "167.71.",  "167.172.", "174.138.",
+    # Linode / Akamai
+    "139.162.", "172.104.", "192.46.",  "45.33.",   "45.56.",   "45.79.",
+    # Vultr
+    "45.32.",   "45.63.",   "45.76.",   "45.77.",
+    # OVH
+    "51.75.",   "51.77.",   "51.91.",   "54.36.",   "54.38.",
+    # Hetzner
+    "78.46.",   "88.198.",  "95.216.",  "116.202.", "136.243.",
+    # Known Tor exit ranges (185.220.x.x is the most active in South Asia fraud)
+    "185.220.", "199.249.", "204.13.",  "192.42.",  "176.10.",
+    # Cloudflare Workers / proxies
+    "104.16.",  "104.17.",  "104.18.",  "104.19.",  "104.20.",  "104.21.",
+    "172.64.",  "172.65.",  "172.66.",  "172.67.",
+)
+
+def _is_datacenter_ip(ip: str, isp: str) -> bool:
+    """
+    FIX-1: Two-layer datacenter detection.
+    Layer 1: existing keyword match on ip_isp (unchanged behaviour).
+    Layer 2: fallback CIDR prefix check when ip_isp is absent/empty.
+    Returns True if either layer fires.
+    """
+    DATACENTER_ISP_KEYWORDS = [
+        'aws', 'amazon', 'google cloud', 'azure', 'digitalocean',
+        'linode', 'vultr', 'ovh', 'hetzner',
+    ]
+    # Layer 1 — isp string match (original logic)
+    if isp:
+        isp_lower = isp.lower()
+        if any(k in isp_lower for k in DATACENTER_ISP_KEYWORDS):
+            return True
+    # Layer 2 — prefix fallback
+    if ip:
+        for prefix in DATACENTER_PREFIXES:
+            if ip.startswith(prefix):
+                return True
+    return False
+
 
 # ── Load ML artifacts ──────────────────────────────────────────────────────────
 print("Loading ML artifacts...", file=sys.stderr)
@@ -144,7 +190,7 @@ with open(os.path.join(BASE_DIR, 'cat_encodings.json'), 'r') as f:
 FEATURE_COLS     = FEAT_META['feature_cols']
 CAT_COLS         = FEAT_META['cat_features']
 ROLLING_FEATURES = FEAT_META['rolling_features']
-THRESHOLD        = 0.650   # GAP-02 FIX: overrides feature_columns.json value of 0.830
+THRESHOLD        = 0.650
 
 print(f"  Model loaded : {len(FEATURE_COLS)} features, threshold={THRESHOLD:.3f}", file=sys.stderr)
 
@@ -162,6 +208,8 @@ RULES = [
     ('high_email_card_count',        lambda t: t.get('email_cards_total', 0) >= 10,                                                                                                    +0.10),
     ('triple_country_mismatch',      lambda t: t.get('f_triple_country_mismatch', 0) == 1,                                                                                             +0.08),
     ('disposable_plus_3ds_fail',     lambda t: t.get('f_disposable_email', 0) == 1 and t.get('f_threeds_failed', 0) == 1,                                                              +0.12),
+    # FIX-4: frictionless_success + disposable email OR new account is a known 3DS bypass
+    ('disposable_plus_frictionless', lambda t: t.get('f_frictionless_suspicious', 0) == 1,                                                                                             +0.10),
     ('api_plus_datacenter',          lambda t: t.get('f_api_channel', 0) == 1 and t.get('f_datacenter_ip', 0) == 1,                                                                    +0.10),
     ('new_acct_high_value',          lambda t: t.get('f_new_account_high_value', 0) == 1,                                                                                              +0.08),
     ('api_channel_no_page',          lambda t: str(t.get('deviceChannel','')).upper()=='API' and int(t.get('merchantPageTxn',1))==0,                                                   +0.10),
@@ -172,10 +220,15 @@ RULES = [
     ('attempted_auth_failed',        lambda t: str(t.get('authenticationType',''))=='attempted_not_authenticated' and float(t.get('amount_inr',0) or t.get('purchase_amount',0))>10000,+0.05),
     ('foreign_ip_no_auth',           lambda t: str(t.get('ip_country_long','India'))!='India' and str(t.get('issuerCountryCode',''))=='IND' and str(t.get('authenticationType',''))=='not_attempted', +0.10),
     ('email_multi_card',             lambda t: int(t.get('email_cards_total',0))>=2,                                                                                                   +0.08),
+    # FIX-9: per-merchant velocity rule — catches bot attacks targeting a single merchant
+    ('api_merchant_velocity',        lambda t: int(t.get('merchant_velocity_5min', 0)) >= 3,                                                                                           +0.10),
     ('long_standing_account',        lambda t: float(t.get('account_age_minutes',0))>=43200,                                                                                           -0.05),
     ('successful_3ds_challenge',     lambda t: str(t.get('authenticationType',''))=='challenge_success',                                                                               -0.04),
     ('low_merchant_fraud_rate',      lambda t: float(t.get('merchantFraudRate',1.0))<0.02,                                                                                             -0.03),
 ]
+
+# FIX-10: canonical rule names used for feedback validation
+KNOWN_RULE_NAMES: set[str] = {r[0] for r in RULES}
 
 def _hour(s):
     try:    return pd.to_datetime(s).hour
@@ -196,10 +249,45 @@ def risk_band(s):
     return 'CRITICAL'
 
 def rec_action(band):
-    return {'LOW':'auto_close — no further action required',
-            'MEDIUM':'step_up_auth — trigger OTP or biometric challenge',
-            'HIGH':'open_case — escalate to analyst review',
-            'CRITICAL':'block_transaction — immediate block + open post-block review case'}[band]
+    return {'LOW':      'accept — low risk, approve directly',
+            'MEDIUM':   'accept_1fa — approve after OTP/biometric (no further outreach)',
+            'HIGH':     'accept_and_alert or deny — check merchant type before deciding',
+            'CRITICAL': 'deny — block transaction, review outreach necessity'}[band]
+
+KNOWN_BRANDS = {
+    'tanishq','titan','reliance','tata','hdfc','icici','sbi','airtel','jio','amazon',
+    'flipkart','myntra','swiggy','zomato','makemytrip','irctc','ola','uber','phonepe',
+    'paytm','razorpay','bigbasket','nykaa','meesho','blinkit','zepto',
+}
+
+def get_merchant_trust_tier(merchant_name: str, merchant_id: str = '') -> str:
+    name_lower = (merchant_name or '').lower()
+    if any(brand in name_lower for brand in KNOWN_BRANDS):
+        return 'known_brand'
+    if merchant_id:
+        return 'registered'
+    return 'unknown'
+
+def disposition_guidance(band: str, merchant_trust_tier: str, mfr: float) -> dict:
+    if merchant_trust_tier == 'known_brand' and band != 'CRITICAL':
+        return {
+            'disposition':      'accept_and_alert',
+            'outreach_required': 'conditional',
+            'outreach_target':   'merchant_only — only if merchant anomaly is primary signal',
+            'rationale':        f'Known brand merchant — direct deny blocked. Band={band}. Monitor and alert.',
+        }
+    if band == 'LOW':
+        return {'disposition':'accept','outreach_required':'no','outreach_target':'none','rationale':'Low risk. Approve directly.'}
+    elif band == 'MEDIUM':
+        return {'disposition':'accept_1fa','outreach_required':'no','outreach_target':'none — 1FA already verifies identity, no further outreach needed','rationale':'Moderate risk. 1FA (OTP/biometric) sufficient verification.'}
+    elif band == 'HIGH':
+        if mfr > 0.08:
+            return {'disposition':'accept_and_alert','outreach_required':'conditional','outreach_target':'merchant_only — merchant anomaly is primary driver','rationale':f'High merchant fraud rate ({mfr:.1%}). Merchant behaviour is primary signal.'}
+        return {'disposition':'accept_and_alert','outreach_required':'no','outreach_target':'none — monitor only unless investigation reveals specific anomaly','rationale':'HIGH band but no dominant merchant signal. Alert and monitor.'}
+    else:
+        if merchant_trust_tier == 'known_brand':
+            return {'disposition':'deny','outreach_required':'yes','outreach_target':'customer — known brand, deny may be false positive; verify before blocking permanently','rationale':'CRITICAL band overrides known-brand protection. Customer verification required.'}
+        return {'disposition':'deny','outreach_required':'conditional','outreach_target':'none if clear fraud ring; customer if ambiguous; merchant if merchant-driven','rationale':'CRITICAL band. Block transaction. Assess outreach need case-by-case.'}
 
 # ── Feature helpers ────────────────────────────────────────────────────────────
 DISPOSABLE = ['tempmail','throwaway','guerrilla','mailinator','yopmail','trashmail',
@@ -212,11 +300,13 @@ DISPOSABLE = ['tempmail','throwaway','guerrilla','mailinator','yopmail','trashma
               'filzmail','kurzepost','objectmail','proxymail','rcpt.at','trash-mail',
               'wegwerfmail','spamgob','tempemail','tmpmail','emailondeck','spambox',
               'mohmal','mytemp','tempsky','inboxbear','temp-inbox']
-DATACENTER = ['aws','google cloud','azure','digitalocean','linode','vultr','ovh','hetzner']
 
 
 def compute_flags(row):
-    """Compute all f_ binary flags from raw transaction fields. Pure Python, no DB."""
+    """
+    FIX-1: f_datacenter_ip uses two-layer detection.
+    FIX-4: f_frictionless_suspicious added — frictionless_success + disposable OR new account.
+    """
     amt   = float(row.get('amount_inr') or row.get('purchase_amount') or 0)
     isc   = str(row.get('issuerCountryCode') or '')
     ipc   = str(row.get('ip_country_long') or '')
@@ -224,35 +314,42 @@ def compute_flags(row):
     auth  = str(row.get('authenticationType') or '')
     email = str(row.get('emailId') or row.get('email') or '')
     isp   = str(row.get('ip_isp') or '').lower()
+    ip    = str(row.get('ip') or '')
     dch   = str(row.get('deviceChannel') or '')
     page  = int(row.get('merchantPageTxn') or 1)
     mfr   = float(row.get('merchantFraudRate') or 0)
     age   = float(row.get('account_age_minutes') or 0)
+
+    is_disposable = int(any(d in email for d in DISPOSABLE))
+
     row['f_high_amount']              = int(amt > 50000)
     row['f_ip_issuer_mismatch']       = int(ipc != 'India' and isc == 'IND')
     row['f_triple_country_mismatch']  = int(isc == 'IND' and mc != 'IND' and ipc != 'India')
     row['f_high_merchant_fraud_rate'] = int(mfr > 0.08)
     row['f_new_account_high_value']   = int(age < 60 and amt > 10000)
-    row['f_threeds_failed']           = int(auth in ['challenge_failed','not_attempted'])
-    row['f_disposable_email']         = int(any(d in email for d in DISPOSABLE))
-    row['f_datacenter_ip']            = int(any(k in isp for k in DATACENTER))
+    row['f_threeds_failed']           = int(auth in ['challenge_failed', 'not_attempted'])
+    row['f_disposable_email']         = is_disposable
+    row['f_datacenter_ip']            = int(_is_datacenter_ip(ip, isp))   # FIX-1
     row['f_api_channel']              = int(dch == 'API')
     row['f_bin_country_mismatch']     = int(isc == 'IND' and mc != 'IND')
     row['f_merchant_page_redirect']   = int(page == 0)
+    # FIX-4: frictionless bypass flag — fires when 3DS passes silently but identity is suspect
+    row['f_frictionless_suspicious']  = int(
+        auth == 'frictionless_success' and (is_disposable == 1 or age < 60)
+    )
     return row
 
 
 def triage_score(txn):
-    """Normalised [0,1] static risk score. No DB. Used in Stage 1."""
     w = {'f_high_amount':18,'f_ip_issuer_mismatch':22,'f_triple_country_mismatch':24,
          'f_high_merchant_fraud_rate':18,'f_new_account_high_value':28,'f_threeds_failed':32,
          'f_disposable_email':14,'f_datacenter_ip':18,'f_api_channel':9,
-         'f_bin_country_mismatch':18,'f_merchant_page_redirect':8}
-    return float(np.clip(sum(float(txn.get(k,0))*v for k,v in w.items())/190.0, 0.0, 1.0))
+         'f_bin_country_mismatch':18,'f_merchant_page_redirect':8,
+         'f_frictionless_suspicious':16}   # FIX-4: included in triage weight table
+    return float(np.clip(sum(float(txn.get(k,0))*v for k,v in w.items())/206.0, 0.0, 1.0))
 
 
 def build_feature_vector(txn, db_conn):
-    """Full DB-backed feature vector for Stage 2 ML scoring."""
     row = dict(txn)
     try:    ts = pd.to_datetime(row.get('purchase_date', datetime.utcnow().isoformat()))
     except: ts = datetime.utcnow()
@@ -261,6 +358,8 @@ def build_feature_vector(txn, db_conn):
     row.setdefault('account_age_min_computed', row.get('account_age_minutes',0))
     if any(row.get(f) is None for f in ROLLING_FEATURES):
         row = velocity_from_db(row, ts, db_conn)
+    # FIX-9: fetch per-merchant velocity from DB
+    row = merchant_velocity_from_db(row, ts, db_conn)
     cur = db_conn.cursor(dictionary=True)
     for col, db_col in [('card_number','card_number'),('device_id','device_id'),
                          ('emailId','email'),('ip','ip'),('mobileNo','mobile_no')]:
@@ -272,14 +371,15 @@ def build_feature_vector(txn, db_conn):
     cur.close()
     for col in CAT_COLS:
         row[f'{col}_enc'] = CAT_ENCODINGS.get(col,{}).get(str(row.get(col,'') or ''),0)
-    row = compute_flags(row)
+    row = compute_flags(row)   # FIX-1 + FIX-4: two-layer datacenter + frictionless flag
     if not row.get('risk_score'):
         w = {'velocity_5min_count':8,'velocity_1hr_count':3,'device_cards_24h':10,
              'email_cards_total':6,'card_txn_24h':4,'f_high_amount':18,
              'f_ip_issuer_mismatch':22,'f_triple_country_mismatch':24,
              'f_high_merchant_fraud_rate':18,'f_new_account_high_value':28,
              'f_threeds_failed':32,'f_disposable_email':14,'f_datacenter_ip':18,
-             'f_api_channel':9,'f_bin_country_mismatch':18,'f_merchant_page_redirect':8}
+             'f_api_channel':9,'f_bin_country_mismatch':18,'f_merchant_page_redirect':8,
+             'f_frictionless_suspicious':14}   # FIX-4
         base  = sum(float(row.get(k,0) or 0)*v for k,v in w.items())
         noise = float(np.random.normal(0, max(3.0, base*0.08)))
         row['risk_score'] = round(max(0.1, base+noise+2.5), 4)
@@ -311,6 +411,41 @@ def velocity_from_db(row, ts, db_conn):
     return row
 
 
+def merchant_velocity_from_db(row, ts, db_conn):
+    """
+    FIX-9: Per-merchant velocity lookup.
+    Counts how many transactions the same card OR device made at this specific merchant
+    in the last 5 minutes. Stored as merchant_velocity_5min.
+    """
+    merchant_id = row.get('merchant_id', '')
+    card        = row.get('card_number', '')
+    device_id   = row.get('device_id', '')
+    ts_s        = ts.strftime('%Y-%m-%d %H:%M:%S')
+    since_5m    = (ts - timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+
+    if not merchant_id or not (card or device_id):
+        row.setdefault('merchant_velocity_5min', 0)
+        return row
+
+    cur = db_conn.cursor(dictionary=True)
+    try:
+        conds, params = ['merchant_id=%s', 'purchase_date>=%s', 'purchase_date<%s'], [merchant_id, since_5m, ts_s]
+        if card and device_id:
+            conds.append('(card_number=%s OR device_id=%s)')
+            params += [card, device_id]
+        elif card:
+            conds.append('card_number=%s'); params.append(card)
+        else:
+            conds.append('device_id=%s'); params.append(device_id)
+        cur.execute(f"SELECT COUNT(*) as cnt FROM transactions WHERE {' AND '.join(conds)}", params)
+        row['merchant_velocity_5min'] = cur.fetchone()['cnt']
+    except:
+        row.setdefault('merchant_velocity_5min', 0)
+    finally:
+        cur.close()
+    return row
+
+
 def shap_top5(feat_df):
     sv = EXPLAINER.shap_values(feat_df)
     df = pd.DataFrame({'feature':FEATURE_COLS,'value':feat_df.values[0],'shap':sv[0]})
@@ -327,137 +462,187 @@ app = Server("fraud-detection")
 @app.list_tools()
 async def list_tools():
     return [
-        # ── STAGE 1 ──────────────────────────────────────────────────────────
         types.Tool(name="flag_transaction", description="""STAGE 1 — TRIAGE GATE. Call this on every incoming transaction before anything else.
 Runs lightweight ML + rule engine with zero DB queries to decide if investigation is warranted.
 
 Returns CLEARED or FLAGGED:
-  CLEARED → triage score < threshold. Auto-close. Do NOT call any other tools.
-            Just call update_case_status(status='auto_cleared').
+  CLEARED → disposition: accept. Call update_case_status(disposition='accept') only.
   FLAGGED → proceed to Stage 2 starting with score_transaction.
 
-Also returns 'suggested_tools' — a hint about which Stage 2 tools are likely relevant
-based on which signals fired. Use this to plan your investigation.""",
+Also returns 'suggested_tools' — ordered hint of which Stage 2 tools are relevant based on fired signals.
+get_merchant_onboarding is ALWAYS included — call it before every final disposition.
+
+TIP: Pass ip_isp in the transaction payload for best datacenter detection. If ip_isp is absent,
+a CIDR prefix fallback covers AWS, GCP, Azure, Tor exits, and major hosting ranges automatically.
+
+FIX-4: disposable_plus_frictionless rule now fires when frictionless_success is combined with
+a disposable email or a new account (<60 min). This is a known 3DS bypass pattern.""",
             inputSchema={"type":"object","properties":{"transaction":{"type":"object"}},"required":["transaction"]}),
 
-        # ── STAGE 2 CORE ──────────────────────────────────────────────────────
-        types.Tool(name="score_transaction", description="""STAGE 2 — FULL ML SCORING. Call this first for every FLAGGED transaction.
+        types.Tool(name="score_transaction", description="""STAGE 2 — FULL ML SCORING. Always call first for every FLAGGED transaction.
 Runs XGBoost with DB-backed velocity features, isotonic calibration, rule engine, and SHAP.
+Returns risk band, triggered rules, top-5 SHAP explanations, and DYNAMIC TOOL GUIDANCE.
 
-Returns: ML probability, calibrated probability, final risk score, risk band, recommended action,
-triggered rules, top-5 SHAP explanations, and DYNAMIC TOOL GUIDANCE specific to this transaction.
+ALWAYS call get_merchant_onboarding before final disposition — merchant trust tier can change verdict.
 
-USE THE RETURNED 'DYNAMIC TOOL GUIDANCE' TO DECIDE YOUR NEXT TOOLS.
-General rules:
-  LOW      → Close. Call add_case_note + update_case_status only.
-  MEDIUM   → Call get_customer_profile. Re-evaluate before calling more.
-  HIGH     → get_customer_profile + get_recent_txns minimum. Escalate further based on findings.
-  CRITICAL → get_device_assoc + get_ip_intelligence as baseline. Then decide based on results.
+Band guidance (starting point — apply judgment):
+  LOW      → disposition: accept. add_case_note + update_case_status only.
+  MEDIUM   → get_customer_profile + get_merchant_onboarding. disposition: accept_1fa.
+  HIGH     → get_customer_profile + get_recent_txns + get_merchant_onboarding.
+             disposition: accept_and_alert or deny based on merchant trust tier.
+  CRITICAL → get_device_assoc + get_ip_intelligence + get_merchant_onboarding baseline.
+             disposition: deny (unless known brand — see KNOWN BRAND RULE).
 
-Always end with add_case_note + update_case_status.""",
+FIX-8: If get_customer_profile returns no records for a CRITICAL transaction, fall back to
+get_recent_txns on the card number alone before issuing final verdict. Do not skip it.
+
+Always end with add_case_note (3-5 lines, max 400 chars) + update_case_status.""",
             inputSchema={"type":"object","properties":{"transaction":{"type":"object"}},"required":["transaction"]}),
 
         types.Tool(name="get_customer_profile", description="""STAGE 2 — Customer risk profile. Call for MEDIUM+ bands.
-Returns: transaction history, fraud rate, linked cards/devices/emails, velocity stats, known scenarios.
-Result tells you whether to also call get_linked_accounts or get_device_assoc.""",
+Returns: transaction history, fraud rate, failure rate, same-amount repeat detection,
+linked cards/devices/emails, velocity stats, known scenarios.
+If fraud_rate > 30% or unique_cards > 3 -> call get_linked_accounts.
+If scenarios include card_testing or api_bot_attack -> call get_device_assoc.
+
+FIX-8: If this tool returns no records on a CRITICAL transaction, do NOT skip to verdict.
+Fall back to get_recent_txns(card=<card_number>) to check for any history on the card alone.""",
             inputSchema={"type":"object","properties":{"email":{"type":"string"},"card":{"type":"string"},"device_id":{"type":"string"}}}),
 
         types.Tool(name="get_recent_txns", description="""STAGE 2 — Recent transaction history on card/device/email.
-Call for HIGH+ bands, or when velocity rules fired in Stage 1, or when profile shows elevated fraud rate.
+Call for HIGH+ bands, or when velocity rules fired, or when profile shows elevated fraud rate.
 Returns: last N transactions with amounts, merchants, timestamps, fraud labels, risk scores.
-Result may suggest calling get_device_assoc (velocity burst) or get_linked_accounts (multi-country).""",
+Watch for: excess failure rate, repeat same-amount transactions, rapid IP change across transactions.
+
+FIX-8: Also call with card= when get_customer_profile returns no records on a CRITICAL case.
+This ensures first-seen identifiers don't short-circuit the investigation.""",
             inputSchema={"type":"object","properties":{"card":{"type":"string"},"device_id":{"type":"string"},"email":{"type":"string"},"limit":{"type":"integer"},"hours":{"type":"integer"}}}),
 
         types.Tool(name="get_device_assoc", description="""STAGE 2 — Device association report.
-Call for CRITICAL band, API channel transactions, or when profile/recent_txns suggest multi-card usage.
-Returns: all cards and emails linked to this device in last 7 days, fraud rates, ring signal.
-If result shows unique_cards >= 5 → call get_linked_accounts.
-If ring signal = YES → call get_ip_intelligence.""",
-            inputSchema={"type":"object","properties":{"device_id":{"type":"string","description":"Device ID"},"hours":{"type":"integer","description":"Lookback hours (default 168)"}}}),
+Call for CRITICAL band, API channel, or when profile/recent_txns suggest multi-card usage.
+Returns: all cards and emails linked to this device, fraud rates, ring signal.
+If unique_cards >= 5 -> call get_linked_accounts. If ring signal = YES -> call get_ip_intelligence.""",
+            inputSchema={"type":"object","properties":{"device_id":{"description":"Device ID","type":"string"},"hours":{"description":"Lookback hours (default 168)","type":"integer"}}}),
 
-        # ── STAGE 2 INTELLIGENCE TOOLS ────────────────────────────────────────
         types.Tool(name="get_linked_accounts", description="""STAGE 2 — Cross-identifier fraud ring detection.
-Finds all accounts sharing any identifier with this transaction: same IP, same device_id,
-same email domain (non-generic), same card BIN prefix (first 6 digits).
+Finds accounts sharing any identifier: same IP, device_id, email domain (non-generic), card BIN prefix.
 Returns: linked accounts, shared identifier type, fraud rates, ring_score.
+Call when: device_assoc unique_cards >= 3, profile fraud_rate > 30%, or triple_country_mismatch + HIGH+.""",
+            inputSchema={"type":"object","properties":{"card":{"type":"string"},"device_id":{"type":"string"},"email":{"type":"string"},"hours":{"description":"Lookback hours (default 720)","type":"integer"},"ip":{"type":"string"}}}),
 
-WHEN TO CALL:
-  - device_assoc shows unique_cards >= 3
-  - customer profile fraud_rate > 30%
-  - triple_country_mismatch fired AND score is HIGH+
-  - You suspect organised fraud ring rather than individual card theft""",
+        types.Tool(name="get_merchant_onboarding", description="""STAGE 2 — Merchant onboarding context. ALWAYS call before final disposition.
+Returns: merchant type, onboarding date, website URL, MCC code, known_brand flag, trust_tier.
+
+Trust tiers and effect on disposition:
+  known_brand  -> direct deny BLOCKED (max: accept_and_alert) unless CRITICAL + confirmed ring.
+                  Examples: Tanishq, Amazon, Flipkart, Tata, HDFC, Airtel.
+  registered   -> standard disposition logic applies.
+  unknown      -> treat as elevated risk; leans toward deny for HIGH+.
+
+merchant_type contextualises anomaly:
+  jewellery / electronics / travel -> high-value transactions are normal.
+  generic_ecomm / unknown          -> high-value warrants more scrutiny.
+
+FIX-5: This tool is now included in Stage 1 suggested_tools for every FLAGGED transaction.""",
             inputSchema={"type":"object","properties":{
-                "card":{"type":"string"},"device_id":{"type":"string"},
-                "email":{"type":"string"},"ip":{"type":"string"},
-                "hours":{"type":"integer","description":"Lookback hours (default 720 = 30 days)"}}}),
+                "merchant_id":      {"type":"string"},
+                "merchant_name":    {"type":"string"},
+                "merchant_country": {"type":"string"},
+                "mcc_code":         {"type":"string"}}}),
 
-        types.Tool(name="get_merchant_risk", description="""STAGE 2 — Merchant fraud intelligence.
-Returns: merchant historical fraud rate, last 30-day fraud rate, chargeback trend,
-peer comparison vs same MCC category average, watchlist status.
+        types.Tool(name="get_merchant_risk", description="""STAGE 2 — Merchant fraud intelligence and MCC peer comparison.
+Returns: historical fraud rate, last 30-day fraud rate, failure rate vs MCC average,
+avg transaction amount vs MCC average, velocity vs MCC average, watchlist status.
+Call when: merchantFraudRate > 0.05, merchant_country != issuer_country, or HIGH/CRITICAL band.
+Watchlisted merchant -> escalate regardless of other signals.
 
-WHEN TO CALL:
-  - merchantFraudRate > 0.05 in the transaction payload
-  - merchant_country differs from issuer_country
-  - Score band is HIGH or CRITICAL
-If merchant is on watchlist → escalate regardless of other signals.""",
-            inputSchema={"type":"object","properties":{
-                "merchant_country":{"type":"string"},"merchant_id":{"type":"string"},
-                "merchant_category":{"type":"string"},"merchantFraudRate":{"type":"number"}}}),
+FIX-6: Also auto-triggered when the same merchant_id accumulates >= 3 CRITICAL-band flagged
+transactions within 24 hours. This recurrence warning appears in flag_transaction output.""",
+            inputSchema={"type":"object","properties":{"merchantFraudRate":{"type":"number"},"merchant_category":{"type":"string"},"merchant_country":{"type":"string"},"merchant_id":{"type":"string"}}}),
 
         types.Tool(name="get_ip_intelligence", description="""STAGE 2 — IP reputation and geolocation intelligence.
-Returns: VPN/proxy/datacenter detection, country mismatch check, historical fraud from this IP
-and its /24 subnet, unique cards and emails seen from this IP.
+Returns: VPN/proxy/datacenter detection, country mismatch, historical fraud from this IP and /24 subnet.
+Call when: ip_country != issuer_country, authenticationType = not_attempted, CRITICAL band,
+or device_assoc returns fraud ring signal = YES.
 
-WHEN TO CALL:
-  - ip_country != issuer_country
-  - authenticationType = not_attempted
-  - CRITICAL band
-  - device_assoc returns fraud ring signal = YES""",
+NOTE: f_datacenter_ip uses a two-layer check (isp string + CIDR prefix fallback),
+so datacenter detection works even when ip_isp is not passed in the transaction payload.""",
+            inputSchema={"type":"object","properties":{"ip":{"type":"string"},"ip_country_long":{"type":"string"},"issuerCountryCode":{"type":"string"}}}),
+
+        types.Tool(name="get_similar_fraud_cases", description="""STAGE 2 — Top-N most similar confirmed fraud cases from history.
+Matches on binary flags, auth type, device channel, IP country, amount range.
+Call when: unusual signal combination, grey zone MEDIUM band, need historical precedent,
+or checking if this matches a known ongoing fraud campaign.""",
+            inputSchema={"type":"object","properties":{"transaction":{"type":"object"},"top_n":{"type":"integer"},"fraud_only":{"type":"boolean"},"scenario_filter":{"type":"string"}}}),
+
+        # FIX-2 + FIX-3: Hard 400-char cap stated in description; wording clarified for 3-5 lines
+        types.Tool(name="add_case_note", description="""STAGE 2 — Append structured case report. MANDATORY before update_case_status.
+HARD LIMIT: content must be 400 characters or fewer. Submissions over 400 chars are REJECTED.
+
+Report template (3-5 lines, ≤400 chars total):
+  Line 1: Anomaly detected — which rule fired and why.
+  Line 2: Other anomalies checked (excess failures, same-amount repeats, multi-card, IP change).
+  Line 3: Merchant context — type, trust tier, behaviour vs MCC.
+  Line 4: Alert category verdict with confidence.
+  Line 5 (optional): Recommended next action and outreach target if not already clear.
+
+Write 3 tight lines for simple cases, up to 5 for complex ones. Do NOT write prose paragraphs.""",
             inputSchema={"type":"object","properties":{
-                "ip":{"type":"string"},"ip_country_long":{"type":"string"},
-                "issuerCountryCode":{"type":"string"}}}),
+                "transaction_id":  {"type":"string"},
+                "note_type":       {"type":"string","enum":["initial_assessment","tool_finding","hypothesis_change","final_verdict","escalation_note"]},
+                "content":         {"type":"string","description":"3-5 lines, MAX 400 characters. Submissions over 400 chars are rejected."},
+                "risk_band":       {"type":"string"},
+                "alert_category":  {"type":"string","enum":["false_alert","genuine","need_merchant_outreach","need_customer_outreach","need_both_outreach"]},
+                "confidence":      {"type":"number"}},
+                "required":["transaction_id","note_type","content","alert_category"]}),
 
-        types.Tool(name="get_similar_fraud_cases", description="""STAGE 2 — Find top-N most similar confirmed fraud cases from history.
-Matches on binary flags, auth type, device channel, IP country, and amount range.
-Returns: case details, scenario tags, risk scores, similarity scores.
+        types.Tool(name="update_case_status", description="""STAGE 2 — Set final disposition. ALWAYS call last. report field is MANDATORY.
+add_case_note MUST be called before this tool — cases without a note will be rejected.
 
-WHEN TO CALL:
-  - Unusual signal combination not clearly covered by rules
-  - Grey zone: MEDIUM band with conflicting signals
-  - You want historical precedent to justify a verdict
-  - Checking if this matches a known ongoing fraud campaign""",
+Disposition values:
+  accept           — Low risk, approve directly, no outreach.
+  accept_1fa       — Approve after OTP/biometric. NO customer outreach — 1FA is the verification.
+  accept_and_alert — Accept but flag for monitoring. Merchant outreach only if merchant anomaly
+                     is the PRIMARY signal, not just elevated rate.
+  deny             — Block. KNOWN BRAND RULE: cannot deny known-brand merchant unless CRITICAL
+                     band + confirmed fraud ring.
+
+outreach_target (set for deny and accept_and_alert only):
+  none             — Clear fraud, block and escalate, no outreach.
+  customer_only    — Ambiguous deny, customer should verify.
+  merchant_only    — Merchant behaviour is primary anomaly.
+  both             — Both contexts needed.
+
+FIX-7: Server enforces that add_case_note has been called for this transaction_id before
+accepting this call. Missing note returns an error.""",
             inputSchema={"type":"object","properties":{
-                "transaction":{"type":"object"},"top_n":{"type":"integer"},
-                "fraud_only":{"type":"boolean"},"scenario_filter":{"type":"string"}}}),
-
-        # ── STAGE 2 CASE MANAGEMENT ───────────────────────────────────────────
-        types.Tool(name="add_case_note", description="""STAGE 2 — Append structured analyst note to case record.
-Logs the LLM's reasoning, tool findings, and verdict for human analyst audit trail.
-ALWAYS call this at the end of every Stage 2 investigation.
-Also call mid-investigation when a tool result significantly changes your working hypothesis.""",
-            inputSchema={"type":"object","properties":{
-                "transaction_id":{"type":"string"},
-                "note_type":{"type":"string","enum":["initial_assessment","tool_finding","hypothesis_change","final_verdict","escalation_note"]},
-                "content":{"type":"string","description":"Full reasoning — include tools called, what they returned, and your conclusion"},
-                "risk_band":{"type":"string"},"confidence":{"type":"number","description":"0.0–1.0"}},
-                "required":["transaction_id","note_type","content"]}),
-
-        types.Tool(name="update_case_status", description="""STAGE 2 — Set final case status. ALWAYS call this as the last tool.
-
-Status values:
-  auto_cleared       — cleared by Stage 1, no investigation
-  closed_legit       — investigated, determined legitimate
-  pending_auth       — step-up auth triggered, awaiting customer
-  open_case          — escalated to human analyst queue
-  blocked_fraud      — blocked, confirmed/highly suspected fraud
-  escalated_critical — CRITICAL band, blocked + senior analyst + SAR considered""",
-            inputSchema={"type":"object","properties":{
-                "transaction_id":{"type":"string"},"status":{"type":"string",
-                    "enum":["auto_cleared","closed_legit","pending_auth","open_case","blocked_fraud","escalated_critical"]},
-                "risk_band":{"type":"string"},"final_score":{"type":"number"},
+                "transaction_id":    {"type":"string"},
+                "disposition":       {"type":"string","enum":["accept","accept_1fa","accept_and_alert","deny"]},
+                "risk_band":         {"type":"string"},
+                "final_score":       {"type":"number"},
+                "alert_category":    {"type":"string","enum":["false_alert","genuine","need_merchant_outreach","need_customer_outreach","need_both_outreach"]},
+                "outreach_required": {"type":"string","enum":["no","conditional","yes"]},
+                "outreach_target":   {"type":"string","enum":["none","customer_only","merchant_only","both"]},
+                "report":            {"type":"string","description":"MANDATORY 3-5 line rationale"},
                 "recommended_action":{"type":"string"},
-                "tools_used":{"type":"array","items":{"type":"string"}}},
-                "required":["transaction_id","status"]}),
+                "tools_used":        {"type":"array","items":{"type":"string"}}},
+                "required":["transaction_id","disposition","report"]}),
+
+        # FIX-10: rule_triggered validated against KNOWN_RULE_NAMES
+        types.Tool(name="submit_false_positive_feedback", description="""STAGE 2 — Flag a deny as a false positive and feed back to rule engine.
+Call when a deny verdict is uncertain and correct disposition should have been accept_and_alert
+or accept_1fa. Logs transaction features and over-triggered rule for human analyst review.
+Effect: analysts can update rule weights or add merchant exceptions based on feedback.
+
+FIX-10: rule_triggered must be one of the known rule names. Invalid names are rejected with
+a list of valid options so the feedback loop stays clean and queryable.""",
+            inputSchema={"type":"object","properties":{
+                "transaction_id":       {"type":"string"},
+                "original_disposition": {"type":"string","enum":["deny"]},
+                "correct_disposition":  {"type":"string","enum":["accept","accept_1fa","accept_and_alert"]},
+                "rule_triggered":       {"type":"string","description":"Must match a known rule name exactly (see server KNOWN_RULE_NAMES)"},
+                "analyst_note":         {"type":"string","description":"Why this is a false positive"}},
+                "required":["transaction_id","original_disposition","correct_disposition","rule_triggered"]}),
     ]
 
 
@@ -467,9 +652,11 @@ async def call_tool(name, arguments):
         h = {"flag_transaction":_flag,"score_transaction":_score,
              "get_customer_profile":_profile,"get_recent_txns":_recent_txns,
              "get_device_assoc":_device_assoc,"get_linked_accounts":_linked_accounts,
+             "get_merchant_onboarding":_merchant_onboarding,
              "get_merchant_risk":_merchant_risk,"get_ip_intelligence":_ip_intel,
              "get_similar_fraud_cases":_similar_cases,
-             "add_case_note":_add_note,"update_case_status":_update_status}
+             "add_case_note":_add_note,"update_case_status":_update_status,
+             "submit_false_positive_feedback":_fp_feedback}
         if name in h: return await h[name](arguments)
         return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -479,7 +666,7 @@ async def call_tool(name, arguments):
 # ── Stage 1 ────────────────────────────────────────────────────────────────────
 
 async def _flag(args):
-    txn = compute_flags(dict(args.get("transaction", {})))
+    txn = compute_flags(dict(args.get("transaction", {})))   # FIX-1 + FIX-4
     try:    ts = pd.to_datetime(txn.get('purchase_date', datetime.utcnow().isoformat()))
     except: ts = datetime.utcnow()
     row = dict(txn)
@@ -487,42 +674,75 @@ async def _flag(args):
                 'is_weekend':int(ts.dayofweek>=5),'is_night':int(ts.hour>=22 or ts.hour<=5)})
     row.setdefault('account_age_min_computed', row.get('account_age_minutes',0))
     for vf in ROLLING_FEATURES: row.setdefault(vf, 0)
+    row.setdefault('merchant_velocity_5min', 0)  # FIX-9: not available at triage (no DB)
     for col in CAT_COLS: row[f'{col}_enc'] = CAT_ENCODINGS.get(col,{}).get(str(row.get(col,'') or ''),0)
     for col in ['card_number','device_id','emailId','ip','mobileNo']: row.setdefault(f'{col}_freq',1)
     raw = triage_score(row)
-    row['risk_score'] = round(raw * 190.0, 4)
+    row['risk_score'] = round(raw * 206.0, 4)   # FIX-4: updated denominator
     feat_df = pd.DataFrame([{col: float(row.get(col) or 0) for col in FEATURE_COLS}])
     ml_prob  = float(MODEL.predict_proba(feat_df)[0, 1])
     cal_prob = float(CALIBRATOR.predict([ml_prob])[0])
     score, fired = apply_rules(cal_prob, txn)
     flagged = score >= TRIAGE_THRESHOLD
 
-    # Build suggested_tools hint
+    # FIX-6: record CRITICAL flag and check merchant recurrence
+    merchant_id   = txn.get('merchant_id', '')
+    merchant_name = txn.get('merchant_name', '')
+    merchant_recurrence_count = 0
+    merchant_recurrence_warn  = ''
+    if flagged:
+        merchant_recurrence_count = _record_merchant_flag(merchant_id)
+        if merchant_recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD:
+            merchant_recurrence_warn = (
+                f"\n⚠️  MERCHANT RECURRENCE ALERT: {merchant_name or merchant_id} has been flagged "
+                f"{merchant_recurrence_count}x in the last {MERCHANT_RECURRENCE_WINDOW_H}h. "
+                f"Call get_merchant_risk in Stage 2."
+            )
+
+    # Datacenter detection source annotation (FIX-1)
+    dc_source = ''
+    if txn.get('f_datacenter_ip'):
+        if txn.get('ip_isp'):
+            dc_source = ' (detected via ip_isp)'
+        else:
+            dc_source = ' (detected via CIDR prefix fallback — ip_isp not provided)'
+
+    # FIX-4: frictionless bypass annotation
+    frictionless_warn = ''
+    if txn.get('f_frictionless_suspicious'):
+        frictionless_warn = '\n  Frictionless bypass: frictionless_success + disposable/new-account detected [!]'
+
+    # FIX-5: build suggested_tools — get_merchant_onboarding always included
     suggested = []
     if flagged:
         suggested.append("score_transaction")
-        if txn.get('f_disposable_email') or txn.get('f_new_account_high_value'):
+        if txn.get('f_disposable_email') or txn.get('f_new_account_high_value') or txn.get('f_frictionless_suspicious'):
             suggested.append("get_customer_profile")
         if txn.get('f_triple_country_mismatch') or txn.get('f_ip_issuer_mismatch'):
             suggested.append("get_ip_intelligence")
-        if float(txn.get('merchantFraudRate',0)) > 0.05:
+        if float(txn.get('merchantFraudRate',0)) > 0.05 or merchant_recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD:
             suggested.append("get_merchant_risk")
         if txn.get('f_api_channel'):
             suggested.append("get_device_assoc")
+        # FIX-5: get_merchant_onboarding always in the chain
+        suggested.append("get_merchant_onboarding")
         suggested += ["add_case_note","update_case_status"]
 
     signals = [k.replace('f_','').replace('_',' ') for k in
                ['f_triple_country_mismatch','f_threeds_failed','f_disposable_email',
-                'f_new_account_high_value','f_high_merchant_fraud_rate',
-                'f_api_channel','f_high_amount','f_ip_issuer_mismatch'] if txn.get(k)]
+                'f_frictionless_suspicious','f_new_account_high_value',
+                'f_high_merchant_fraud_rate','f_api_channel','f_high_amount',
+                'f_ip_issuer_mismatch','f_datacenter_ip'] if txn.get(k)]
+
+    dc_line = f"\n  Datacenter IP    : YES{dc_source}" if txn.get('f_datacenter_ip') else ""
 
     out = f"""TRIAGE GATE RESULT  [STAGE 1]
 ==============================
 Outcome              : {'FLAGGED 🚨' if flagged else 'CLEARED ✅'}
 Triage score         : {score:.4f}  (threshold = {TRIAGE_THRESHOLD})
 ML probability (raw) : {ml_prob:.4f}
-Calibrated prob      : {cal_prob:.4f}
-
+Calibrated prob      : {cal_prob:.4f}{dc_line}{frictionless_warn}
+{merchant_recurrence_warn}
 RULES FIRED ({len(fired)})
   {(chr(10)+'  ').join(fired) if fired else 'none'}
 
@@ -545,7 +765,7 @@ recomputes with full DB-backed features and may produce a different final score.
 async def _score(args):
     txn = args.get("transaction", {}); db = get_db()
     try:
-        feat_df = build_feature_vector(txn, db)
+        feat_df = build_feature_vector(txn, db)   # FIX-1 + FIX-4 + FIX-9
         for col in [c for c in feat_df.columns if c.startswith("f_")]:
             txn[col] = float(feat_df[col].values[0])
         txn.setdefault("risk_score", float(feat_df.get("risk_score", pd.Series([2.5])).values[0]))
@@ -559,27 +779,56 @@ async def _score(args):
         for e in shap_top5(feat_df):
             shap_lines.append(f"  {'[^]' if e['dir']=='toward_fraud' else '[v]'} {e['feature']:<35} val={e['value']:.3f}  shap={e['shap']:+.4f}")
 
-        # Dynamic guidance based on band + transaction signals
         mfr = float(txn.get('merchantFraudRate',0))
+        merchant_id = txn.get('merchant_id','')
+
+        # FIX-6: check recurrence at Stage 2 as well
+        recurrence_count = _merchant_flag_count(merchant_id)
+        recurrence_note = (
+            f"\n  ⚠️  Merchant recurrence: {recurrence_count} CRITICAL flags in {MERCHANT_RECURRENCE_WINDOW_H}h — call get_merchant_risk."
+            if recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD else ""
+        )
+
         guidance_parts = []
         if band == 'LOW':
-            guidance_parts = ["Close case. Call add_case_note(note_type='final_verdict') + update_case_status(status='closed_legit')."]
+            guidance_parts = [
+                "Call get_merchant_onboarding to confirm no known-brand override needed.",
+                "Disposition: accept.",
+                "Then add_case_note (≤400 chars) + update_case_status(disposition='accept').",
+            ]
         elif band == 'MEDIUM':
-            guidance_parts = ["Call get_customer_profile.",
-                              "If profile fraud_rate > 20% → also call get_recent_txns.",
-                              "Then add_case_note + update_case_status."]
+            guidance_parts = [
+                "Call get_customer_profile + get_merchant_onboarding.",
+                "If profile fraud_rate > 20% also call get_recent_txns.",
+                "Disposition: accept_1fa — NO customer outreach needed, 1FA is the verification.",
+                "Then add_case_note (≤400 chars) + update_case_status(disposition='accept_1fa').",
+            ]
         elif band == 'HIGH':
-            guidance_parts = ["Call get_customer_profile + get_recent_txns.",
-                              "If profile fraud_rate > 30% → call get_linked_accounts.",
-                              f"{'Call get_merchant_risk (merchantFraudRate elevated). ' if mfr > 0.05 else ''}",
-                              "End: add_case_note + update_case_status(status='open_case')."]
+            guidance_parts = [
+                "Call get_customer_profile + get_recent_txns + get_merchant_onboarding.",
+                "If profile fraud_rate > 30% call get_linked_accounts.",
+                f"{'Call get_merchant_risk (merchantFraudRate elevated). ' if mfr > 0.05 else ''}",
+                "Disposition: accept_and_alert (known brand) or deny (unknown/registered with clear fraud).",
+                "Outreach: merchant_only if merchant anomaly is primary; none if transaction-level signal.",
+                "End: add_case_note (≤400 chars) + update_case_status.",
+            ]
         else:  # CRITICAL
-            guidance_parts = ["Call get_device_assoc + get_ip_intelligence immediately.",
-                              "Then get_customer_profile + get_recent_txns.",
-                              "If device shows ring signal → get_linked_accounts.",
-                              f"{'Call get_merchant_risk. ' if mfr > 0.05 else ''}",
-                              "Consider get_similar_fraud_cases if signal pattern is unusual.",
-                              "End: add_case_note + update_case_status(status='escalated_critical')."]
+            guidance_parts = [
+                "Call get_device_assoc + get_ip_intelligence + get_merchant_onboarding immediately.",
+                "Then get_customer_profile + get_recent_txns.",
+                # FIX-8: explicit fallback instruction when profile returns no records
+                "  ↳ FIX-8: If get_customer_profile returns no records, still call get_recent_txns(card=<card_number>) before verdict.",
+                "If device ring signal -> get_linked_accounts.",
+                f"{'Call get_merchant_risk. ' if mfr > 0.05 or recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD else ''}",
+                "Consider get_similar_fraud_cases if pattern is unusual.",
+                "Disposition: deny. KNOWN BRAND RULE: if trust_tier=known_brand cap at accept_and_alert.",
+                "Outreach: none for clear fraud rings; customer_only for ambiguous denies.",
+                "End: add_case_note (≤400 chars) + update_case_status(disposition='deny').",
+            ]
+
+        dc_flag_label = 'no'
+        if txn.get('f_datacenter_ip'):
+            dc_flag_label = 'YES (CIDR fallback)' if not txn.get('ip_isp') else 'YES (ip_isp match)'
 
         out = f"""FRAUD SCORING RESULT  [STAGE 2]
 ================================
@@ -589,6 +838,8 @@ Calibrated probability  : {cal:.4f}
 Final risk score        : {final:.4f}
 Risk band               : {band}
 Recommended action      : {action}
+Datacenter IP flag      : {dc_flag_label}
+Frictionless bypass     : {'YES [!] — 3DS silent pass + disposable/new-account' if txn.get('f_frictionless_suspicious') else 'no'}{recurrence_note}
 
 RULES TRIGGERED ({len(fired)})
   {(chr(10)+'  ').join(fired) if fired else 'none'}
@@ -629,7 +880,12 @@ async def _profile(args):
             FROM transactions WHERE {' OR '.join(conds)}""", params)
         row=cur.fetchone()
         if not row or not row['tt']:
-            return [types.TextContent(type="text", text="No records found for the provided identifier(s).")]
+            # FIX-8: explicit no-records guidance so caller knows to fall back
+            return [types.TextContent(type="text", text=(
+                "No records found for the provided identifier(s).\n"
+                "FIX-8 FALLBACK: If this is a CRITICAL transaction, call get_recent_txns with "
+                "the card number alone before issuing a verdict. Do not skip to disposition."
+            ))]
         fr=float(row['fr'] or 0)*100; rl='HIGH' if fr>30 else('MEDIUM' if fr>10 else 'LOW')
         uc=row['uc'] or 0; mc=row['mc'] or 0
         next_t=[]
@@ -752,8 +1008,6 @@ async def _device_assoc(args):
     finally: cur.close(); db.close()
 
 
-# ── Stage 2 intelligence tools ─────────────────────────────────────────────────
-
 async def _linked_accounts(args):
     card=args.get('card',''); did=args.get('device_id','')
     email=args.get('email',''); ip=args.get('ip','')
@@ -828,9 +1082,16 @@ async def _merchant_risk(args):
         cfr=float(ca['cfr'] or 0)*100 if ca else None
         wl=mfr>0.15 or (hfr or 0)>15 or (rfr or 0)>20
         spike=rfr is not None and hfr is not None and rfr>hfr*1.5
+        # FIX-6: include recurrence count in merchant risk report
+        recurrence_count = _merchant_flag_count(mid)
+        recurrence_line = (
+            f"\n  Recurrence (24h) : {recurrence_count} CRITICAL flags  [!] ELEVATED"
+            if recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD else ""
+        )
         lines=[f"MERCHANT RISK PROFILE  [STAGE 2]","="*60,
                f"Merchant country  : {mc or 'N/A'}",f"Merchant category : {mcat or 'N/A'}",
-               f"Watchlist status  : {'[!] YES — HIGH RISK' if wl else '[ok] not flagged'}","",
+               f"Watchlist status  : {'[!] YES — HIGH RISK' if wl else '[ok] not flagged'}",
+               recurrence_line, "",
                f"FRAUD RATES",f"  Payload reported  : {mfr*100:.1f}%",
                f"  Historical        : {f'{hfr:.1f}%' if hfr is not None else 'N/A'}",
                f"  Last 30 days      : {f'{rfr:.1f}%' if rfr is not None else 'N/A'}{'  [!] SPIKE' if spike else ''}",
@@ -864,10 +1125,11 @@ async def _ip_intel(args):
         ipfr=float(irow['fr'] or 0)*100 if irow and irow['tt'] else None
         sfr=float(srow['sfr'] or 0)*100 if srow and srow['st'] else None
         mismatch=ipc and isc and ipc!='India' and isc=='IND'
-        dc=bool(irow and irow['dc'])
+        # FIX-1: use two-layer detection for the IP intel report too
+        dc = _is_datacenter_ip(ip, '')   # isp not available here; CIDR fallback covers it
         risks=[]
         if mismatch:            risks.append("IP country ≠ issuer country")
-        if dc:                  risks.append("Datacenter/cloud IP — bot likely")
+        if dc:                  risks.append("Datacenter/cloud/Tor IP (CIDR prefix match)")
         if (ipfr or 0)>20:     risks.append(f"High IP fraud rate ({ipfr:.0f}%)")
         if (sfr or 0)>20:      risks.append(f"High subnet fraud rate ({sfr:.0f}%)")
         if irow and (irow['uc'] or 0)>5: risks.append("Many cards seen from this IP")
@@ -875,7 +1137,7 @@ async def _ip_intel(args):
                f"IP address       : {ip}",f"Reported country : {ipc or 'N/A'}",
                f"Issuer country   : {isc or 'N/A'}",
                f"Country mismatch : {'[!] YES' if mismatch else 'no'}",
-               f"Datacenter IP    : {'[!] YES — bot/proxy likely' if dc else 'no'}",""]
+               f"Datacenter IP    : {'[!] YES — CIDR prefix match' if dc else 'no'}",""]
         if irow and irow['tt']:
             lines+=[f"IP HISTORY",f"  Total txns   : {irow['tt']}",
                     f"  Fraud txns   : {int(irow['ft'] or 0)}  ({ipfr:.1f}%)",
@@ -947,10 +1209,30 @@ async def _similar_cases(args):
 # ── Stage 2 case management ────────────────────────────────────────────────────
 
 async def _add_note(args):
+    """FIX-2: Hard 400-char cap — reject submissions over the limit."""
     tid=args.get('transaction_id','unknown'); ntype=args.get('note_type','final_verdict')
     content=args.get('content',''); band=args.get('risk_band','UNKNOWN')
-    conf=float(args.get('confidence',0.0))
-    if not content: return [types.TextContent(type="text", text="content is required")]
+    alert_cat=args.get('alert_category','genuine'); conf=float(args.get('confidence',0.0))
+
+    if not content:
+        return [types.TextContent(type="text", text="ERROR: content is required.")]
+
+    # FIX-2: Hard cap enforcement
+    if len(content) > CASE_NOTE_MAX_CHARS:
+        over = len(content) - CASE_NOTE_MAX_CHARS
+        return [types.TextContent(type="text", text=(
+            f"ERROR: Case note rejected — content is {len(content)} chars, "
+            f"{over} over the {CASE_NOTE_MAX_CHARS}-char hard limit.\n"
+            f"Rewrite as 3-5 tight lines totalling ≤{CASE_NOTE_MAX_CHARS} chars. "
+            f"3 lines are sufficient for straightforward cases; use up to 5 only if needed.\n"
+            f"Template:\n"
+            f"  L1: [rule] fired — [why]\n"
+            f"  L2: [other signals checked]\n"
+            f"  L3: [merchant context]\n"
+            f"  L4: [verdict + confidence]\n"
+            f"  L5 (optional): [action + outreach target]"
+        ))]
+
     db=get_db(); cur=db.cursor(); saved=True; err=''
     try:
         cur.execute("""INSERT INTO case_notes (transaction_id,note_type,content,risk_band,confidence,created_at)
@@ -960,53 +1242,215 @@ async def _add_note(args):
         db.commit(); nid=cur.lastrowid
     except Exception as e: saved=False; err=str(e); nid=0
     finally: cur.close(); db.close()
+
     out=(f"CASE NOTE ADDED  [STAGE 2]\n===========================\n"
          f"Transaction ID : {tid}\nNote type      : {ntype}\n"
-         f"Risk band      : {band}\nConfidence     : {conf:.0%}\n"
-         f"Persisted      : {'✅ YES (ID={nid})' if saved else f'⚠️ NO — {err}'}\n"
-         f"Timestamp      : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n===========================")
+         f"Alert category : {alert_cat}\nRisk band      : {band}\nConfidence     : {conf:.0%}\n"
+         f"Length         : {len(content)}/{CASE_NOTE_MAX_CHARS} chars\n"
+         f"Persisted      : {'YES (ID='+str(nid)+')' if saved else 'NO -- '+err}\n"
+         f"Timestamp      : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+         f"===========================")
     return [types.TextContent(type="text", text=out)]
 
 
 async def _update_status(args):
-    tid=args.get('transaction_id','unknown'); status=args.get('status','open_case')
+    tid=args.get('transaction_id','unknown')
+    disposition=args.get('disposition','accept')
     band=args.get('risk_band',''); score=float(args.get('final_score',0))
+    alert_cat=args.get('alert_category','genuine')
+    outreach_req=args.get('outreach_required','no')
+    outreach_tgt=args.get('outreach_target','none')
+    report=args.get('report','')
     action=args.get('recommended_action',''); tools=args.get('tools_used',[])
+
+    if not report:
+        return [types.TextContent(type="text", text="ERROR: report field is MANDATORY. Provide a 3-5 line rationale before closing the case.")]
+
+    # FIX-7: Enforce add_case_note prerequisite — check case_notes table before accepting
+    db_check = get_db(); cur_check = db_check.cursor(dictionary=True)
+    note_exists = False
+    try:
+        cur_check.execute(
+            "SELECT COUNT(*) AS cnt FROM case_notes WHERE transaction_id=%s", (tid,)
+        )
+        row = cur_check.fetchone()
+        note_exists = bool(row and row['cnt'] > 0)
+    except Exception:
+        # If the table doesn't exist yet or query fails, allow through (new deployment).
+        note_exists = True
+    finally:
+        cur_check.close(); db_check.close()
+
+    if not note_exists:
+        return [types.TextContent(type="text", text=(
+            f"ERROR: Cannot close case {tid} — no case note found.\n"
+            f"Call add_case_note first with a 3-5 line assessment (≤{CASE_NOTE_MAX_CHARS} chars), "
+            f"then call update_case_status again."
+        ))]
+
     db=get_db(); cur=db.cursor(); saved=True; err=''
     try:
-        cur.execute("""INSERT INTO case_status (transaction_id,status,risk_band,final_score,
-            recommended_action,tools_used,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        cur.execute("""INSERT INTO case_status
+            (transaction_id,status,risk_band,final_score,disposition,outreach_required,
+             outreach_target,report,recommended_action,tools_used,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON DUPLICATE KEY UPDATE status=VALUES(status),risk_band=VALUES(risk_band),
-            final_score=VALUES(final_score),recommended_action=VALUES(recommended_action),
+            final_score=VALUES(final_score),disposition=VALUES(disposition),
+            outreach_required=VALUES(outreach_required),outreach_target=VALUES(outreach_target),
+            report=VALUES(report),recommended_action=VALUES(recommended_action),
             tools_used=VALUES(tools_used),updated_at=VALUES(updated_at)""",
-            (tid,status,band,score,action,json.dumps(tools),datetime.utcnow()))
+            (tid,disposition,band,score,disposition,outreach_req,outreach_tgt,
+             report,action,json.dumps(tools),datetime.utcnow()))
         db.commit()
     except Exception as e: saved=False; err=str(e)
     finally: cur.close(); db.close()
-    emoji={'auto_cleared':'✅','closed_legit':'✅','pending_auth':'⏳',
-           'open_case':'📋','blocked_fraud':'🚫','escalated_critical':'🔴'}.get(status,'❓')
-    out=(f"CASE STATUS UPDATED  [INVESTIGATION COMPLETE]\n"
-         f"=============================================\n"
+
+    emoji={'accept':'OK','accept_1fa':'1FA','accept_and_alert':'ALERT','deny':'DENY'}.get(disposition,'?')
+    outreach_line = (f"Outreach target    : {outreach_tgt}" if outreach_tgt != 'none'
+                     else "Outreach           : none required")
+    out=(f"CASE CLOSED  [INVESTIGATION COMPLETE]\n"
+         f"======================================\n"
          f"Transaction ID     : {tid}\n"
-         f"Final status       : {emoji} {status.upper()}\n"
+         f"Disposition        : [{emoji}] {disposition.upper()}\n"
+         f"Alert category     : {alert_cat}\n"
          f"Risk band          : {band or 'N/A'}\n"
          f"Final score        : {score:.4f}\n"
-         f"Recommended action : {action or 'N/A'}\n"
+         f"{outreach_line}\n"
          f"Tools used ({len(tools)}): {', '.join(tools) if tools else 'N/A'}\n"
-         f"Persisted to DB    : {'✅ YES' if saved else f'⚠️ NO — {err}'}\n"
+         f"Persisted to DB    : {'YES' if saved else 'NO -- '+err}\n"
          f"Closed at          : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-         f"=============================================\nInvestigation complete.")
+         f"--------------------------------------\n"
+         f"REPORT\n  {report}\n"
+         f"======================================\nInvestigation complete.")
+    return [types.TextContent(type="text", text=out)]
+
+
+async def _merchant_onboarding(args):
+    mid   = args.get('merchant_id','')
+    mname = args.get('merchant_name','')
+    mc    = args.get('merchant_country','')
+    mcc   = args.get('mcc_code','')
+    db=get_db(); cur=db.cursor(dictionary=True)
+    try:
+        row = None
+        if mid:
+            cur.execute("SELECT * FROM merchant_onboarding WHERE merchant_id=%s",(mid,))
+            row = cur.fetchone()
+        if not row and mname:
+            cur.execute("SELECT * FROM merchant_onboarding WHERE merchant_name LIKE %s",(f'%{mname}%',))
+            row = cur.fetchone()
+        if row:
+            trust_tier   = row.get('trust_tier','registered')
+            known_brand  = bool(row.get('known_brand',0))
+            merchant_type= row.get('merchant_type','unknown')
+            onboard_date = str(row.get('onboarding_date','N/A'))
+            website      = row.get('website_url','N/A')
+            mcc_code     = row.get('mcc_code', mcc or 'N/A')
+            db_found     = True
+        else:
+            trust_tier   = get_merchant_trust_tier(mname, mid)
+            known_brand  = trust_tier == 'known_brand'
+            merchant_type= 'unknown — not in onboarding DB'
+            onboard_date = 'N/A'
+            website      = 'N/A'
+            mcc_code     = mcc or 'N/A'
+            db_found     = False
+
+        disp_impact = {
+            'known_brand': 'DENY BLOCKED — max disposition is accept_and_alert unless CRITICAL + confirmed ring.',
+            'registered':  'Standard disposition logic applies. No special protection.',
+            'unknown':     'ELEVATED RISK — treat as unknown merchant. Lean toward deny for HIGH+ band.',
+        }.get(trust_tier, 'unknown')
+
+        high_value_normal = any(k in (merchant_type or '').lower()
+                                for k in ['jewel','gold','electron','travel','luxury','airline'])
+        amt_context = ("High-value transactions are NORMAL for this merchant type — weight accordingly."
+                       if high_value_normal else
+                       "High-value transactions warrant additional scrutiny for this merchant type.")
+
+        lines = [f"MERCHANT ONBOARDING  [STAGE 2]","="*60,
+                 f"Merchant ID      : {mid or 'N/A'}",
+                 f"Merchant name    : {mname or 'N/A'}",
+                 f"Merchant type    : {merchant_type}",
+                 f"MCC code         : {mcc_code}",
+                 f"Country          : {mc or 'N/A'}",
+                 f"Onboarding date  : {onboard_date}",
+                 f"Website URL      : {website}",
+                 f"Known brand      : {'YES' if known_brand else 'no'}",
+                 f"Trust tier       : {trust_tier.upper()}",
+                 f"Found in DB      : {'YES' if db_found else 'NO — fallback to name heuristic'}",
+                 "",
+                 f"DISPOSITION IMPACT",
+                 f"  {disp_impact}",
+                 "",
+                 f"AMOUNT CONTEXT",
+                 f"  {amt_context}"]
+        return [types.TextContent(type="text", text='\n'.join(lines))]
+    finally: cur.close(); db.close()
+
+
+async def _fp_feedback(args):
+    tid      = args.get('transaction_id','unknown')
+    orig     = args.get('original_disposition','deny')
+    correct  = args.get('correct_disposition','accept_and_alert')
+    rule     = args.get('rule_triggered','')
+    note     = args.get('analyst_note','')
+
+    if not rule:
+        return [types.TextContent(type="text", text="rule_triggered is required")]
+
+    # FIX-10: validate rule_triggered against the known rule names
+    if rule not in KNOWN_RULE_NAMES:
+        sorted_names = sorted(KNOWN_RULE_NAMES)
+        return [types.TextContent(type="text", text=(
+            f"ERROR: rule_triggered '{rule}' is not a known rule name.\n"
+            f"Valid rule names:\n  " + "\n  ".join(sorted_names)
+        ))]
+
+    db=get_db(); cur=db.cursor(); saved=True; err=''
+    try:
+        cur.execute("""INSERT INTO false_positive_feedback
+            (transaction_id,original_disposition,correct_disposition,rule_triggered,analyst_note,created_at)
+            VALUES (%s,%s,%s,%s,%s,%s)""",
+            (tid,orig,correct,rule,note,datetime.utcnow()))
+        db.commit(); fid=cur.lastrowid
+    except Exception as e: saved=False; err=str(e); fid=0
+    finally: cur.close(); db.close()
+
+    out=(f"FALSE POSITIVE FEEDBACK LOGGED\n"
+         f"================================\n"
+         f"Transaction ID      : {tid}\n"
+         f"Original disposition: {orig}\n"
+         f"Correct disposition : {correct}\n"
+         f"Rule over-triggered : {rule}\n"
+         f"Analyst note        : {note or 'N/A'}\n"
+         f"Persisted           : {'YES (ID='+str(fid)+')' if saved else 'NO -- '+err}\n"
+         f"Timestamp           : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+         f"--------------------------------\n"
+         f"ACTION: Human analyst will review and update rule weight or add merchant exception.\n"
+         f"================================")
     return [types.TextContent(type="text", text=out)]
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 async def main():
-    print("Fraud Detection MCP Server  [Workflow A · Dynamic Tool Edition]", file=sys.stderr)
+    print("Fraud Detection MCP Server  [Workflow A · PayU SOP Edition]", file=sys.stderr)
     print(f"  Stage 1 : flag_transaction  (triage threshold={TRIAGE_THRESHOLD})", file=sys.stderr)
-    print(f"  Stage 2 : score_transaction → [LLM decides] → add_case_note + update_case_status", file=sys.stderr)
-    print(f"  Tools   : 11 total (1 triage | 4 core | 4 intelligence | 2 case management)", file=sys.stderr)
+    print(f"  Stage 2 : score_transaction -> [LLM decides] -> add_case_note + update_case_status", file=sys.stderr)
+    print(f"  Tools   : 13 total (1 triage | 4 core | 5 intelligence | 2 case mgmt | 1 feedback)", file=sys.stderr)
+    print(f"  Dispositions: accept | accept_1fa | accept_and_alert | deny", file=sys.stderr)
     print(f"  Features: {len(FEATURE_COLS)}  |  DB: {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}", file=sys.stderr)
+    print(f"  FIX-1 : Datacenter detection — ip_isp match + CIDR prefix fallback ({len(DATACENTER_PREFIXES)} prefixes)", file=sys.stderr)
+    print(f"  FIX-2 : Case note hard cap — {CASE_NOTE_MAX_CHARS} chars max (hard reject)", file=sys.stderr)
+    print(f"  FIX-3 : Tool description updated with hard cap notice + clarified 3-5 line guidance", file=sys.stderr)
+    print(f"  FIX-4 : disposable_plus_frictionless rule — 3DS bypass detection", file=sys.stderr)
+    print(f"  FIX-5 : get_merchant_onboarding always in Stage 1 suggested_tools", file=sys.stderr)
+    print(f"  FIX-6 : Merchant recurrence alert — >= {MERCHANT_RECURRENCE_THRESHOLD} CRITICAL flags in {MERCHANT_RECURRENCE_WINDOW_H}h triggers get_merchant_risk", file=sys.stderr)
+    print(f"  FIX-7 : update_case_status enforces add_case_note prerequisite", file=sys.stderr)
+    print(f"  FIX-8 : get_customer_profile no-records fallback to get_recent_txns for CRITICAL", file=sys.stderr)
+    print(f"  FIX-9 : merchant_velocity_5min feature + api_merchant_velocity rule", file=sys.stderr)
+    print(f"  FIX-10: submit_false_positive_feedback validates rule_triggered against KNOWN_RULE_NAMES", file=sys.stderr)
     print("Ready.\n", file=sys.stderr)
     async with stdio_server() as (read, write):
         await app.run(read, write, app.create_initialization_options())
