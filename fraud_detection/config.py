@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DB_CONFIG = {
     'host':     'localhost',
-    'port':     3306,
+    'port':     3307,
     'user':     'root',
     'password': '',
     'database': 'fraud_detection',

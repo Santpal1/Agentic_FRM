@@ -150,42 +150,49 @@ TOOL_PRIORITY_LEVELS = {
 def get_tools_for_flags(flags_fired, merchant_fraud_rate=0.0):
     """
     Get tool recommendations based on flags fired in Stage 1.
-    Returns list of dicts with tool, priority, reason.
+    Returns list of dicts with standardized tool, priority_level, priority_order, reason, source.
     """
     tools = []
     seen = set()
+    priority_order_counter = 0
     
     for flag in flags_fired:
         if flag in FLAG_TOOL_MAPPING:
             mapping = FLAG_TOOL_MAPPING[flag]
             tool_name = mapping['tool']
             if tool_name not in seen:
+                priority_num = mapping['priority']
+                priority_level = 'CRITICAL' if priority_num == 2 else 'HIGH' if priority_num == 3 else 'CONDITIONAL'
                 tools.append({
                     'tool': tool_name,
-                    'priority': mapping['priority'],
+                    'priority_level': priority_level,
+                    'priority_order': priority_order_counter,
                     'reason': mapping['reason'],
                     'source': 'flag_signal'
                 })
+                priority_order_counter += 1
                 seen.add(tool_name)
     
     # High merchant fraud rate warrants get_merchant_risk
     if merchant_fraud_rate > 0.05 and 'get_merchant_risk' not in seen:
         tools.append({
             'tool': 'get_merchant_risk',
-            'priority': 2,
+            'priority_level': 'CRITICAL',
+            'priority_order': priority_order_counter,
             'reason': f'Merchant fraud rate elevated at {merchant_fraud_rate:.1%}',
             'source': 'merchant_signal'
         })
+        priority_order_counter += 1
         seen.add('get_merchant_risk')
     
     # Add mandatory closure tools
     if not any(t['tool'] in ['add_case_note', 'update_case_status'] for t in tools):
         tools.extend([
-            {'tool': 'add_case_note', 'priority': 1, 'reason': 'Document investigation findings', 'source': 'mandatory'},
-            {'tool': 'update_case_status', 'priority': 1, 'reason': 'Close case with final disposition', 'source': 'mandatory'}
+            {'tool': 'add_case_note', 'priority_level': 'ALWAYS', 'priority_order': priority_order_counter, 'reason': 'Document investigation findings', 'source': 'mandatory'},
+            {'tool': 'update_case_status', 'priority_level': 'ALWAYS', 'priority_order': priority_order_counter + 1, 'reason': 'Close case with final disposition', 'source': 'mandatory'}
         ])
     
-    return sorted(tools, key=lambda x: x['priority'])
+    return sorted(tools, key=lambda x: x['priority_order'])
 
 
 def get_tools_for_band(band, merchant_fraud_rate=0.0, has_ring_signal=False):
@@ -240,9 +247,10 @@ def get_tools_for_band(band, merchant_fraud_rate=0.0, has_ring_signal=False):
 def get_tools_for_shap_features(shap_features):
     """
     Get tool recommendations based on top SHAP features.
-    Returns list of dicts with tool, feature, reason.
+    Returns list of dicts with tool, features, reason, and standardized priority fields.
     """
     tools = {}  # Deduped by tool name
+    priority_order_counter = 0
     
     for feature_info in shap_features:
         feature_name = feature_info.get('feature', '')
@@ -253,9 +261,12 @@ def get_tools_for_shap_features(shap_features):
                     tools[tool] = {
                         'tool': tool,
                         'features': [feature_name],
+                        'priority_level': 'HIGH',
+                        'priority_order': priority_order_counter,
                         'reason': mapping['reason'],
                         'source': 'shap_analysis'
                     }
+                    priority_order_counter += 1
                 else:
                     tools[tool]['features'].append(feature_name)
     

@@ -60,12 +60,15 @@ NEXT STEP
         ml  = float(MODEL.predict_proba(feat_df)[0, 1])
         cal = float(CALIBRATOR.predict([ml])[0])
         
-        # NEW: Use Stage 1 rules if available, else recompute
-        if stage_1_context.get('rules_fired'):
-            final = cal  # Use calibrated probability
-            fired = stage_1_context.get('rules_fired', [])
-        else:
-            final, fired = apply_rules(cal, txn)
+        # ENHANCED: Combine Stage 1 results with Stage 2 recalculation
+        # Stage 2 has real velocity features, so rules may fire differently
+        # Always recompute rules to capture velocity-based signals
+        final, fired_stage2 = apply_rules(cal, txn)
+        
+        # Log Stage 1 rules for context, but use Stage 2 rules for final decision
+        stage1_rules = stage_1_context.get('rules_fired', []) if stage_1_context else []
+        fired = fired_stage2  # Stage 2 rules take precedence
+        
         band = risk_band(final); action = rec_action(band)
 
         # ENHANCED SHAP ANALYSIS with tool mapping

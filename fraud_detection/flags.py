@@ -30,7 +30,7 @@ def compute_flags(row):
     row['f_high_amount']              = int(amt > 50000)
     row['f_ip_issuer_mismatch']       = int(ipc != 'India' and isc == 'IND')
     row['f_triple_country_mismatch']  = int(isc == 'IND' and mc != 'IND' and ipc != 'India')
-    row['f_high_merchant_fraud_rate'] = int(mfr > 0.08)
+    row['f_high_merchant_fraud_rate'] = int(mfr > 0.05)
     row['f_new_account_high_value']   = int(age < 60 and amt > 10000)
     row['f_threeds_failed']           = int(auth in ['challenge_failed', 'not_attempted'])
     row['f_disposable_email']         = is_disposable

@@ -78,7 +78,8 @@ async def flag_transaction(args):
     if flagged:
         suggested_tools.insert(0, {
             'tool': 'score_transaction',
-            'priority': 0,
+            'priority_level': 'ALWAYS',
+            'priority_order': -1,
             'reason': 'Full ML scoring with velocity features',
             'source': 'mandatory_stage2'
         })
