@@ -16,11 +16,13 @@ DB_CONFIG = {
     'charset':  'utf8mb4',
 }
 
-# Risk band thresholds
-TRIAGE_THRESHOLD = 0.25
-BAND_LOW    = 0.30
-BAND_MEDIUM = 0.60
-BAND_HIGH   = 0.80
+# Risk band thresholds (unified and aligned)
+TRIAGE_THRESHOLD = 0.25      # CLEARED vs FLAGGED at Stage 1
+BAND_CLEARED = 0.25          # Auto-close (no investigation needed)
+BAND_LOW    = 0.35           # Low risk (minimal investigation)
+BAND_MEDIUM = 0.60           # Medium risk (profile + merchant check)
+BAND_HIGH   = 0.80           # High risk (full investigation)
+BAND_CRITICAL = 1.0          # Critical risk (block and escalate)
 
 # Case note hard limit (FIX-2)
 CASE_NOTE_MAX_CHARS = 400

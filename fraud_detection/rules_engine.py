@@ -1,10 +1,11 @@
 """
 Rule engine for fraud detection. Includes scoring rules, risk banding, and merchant trust tier logic.
+Enhanced with unified thresholds aligned across Stage 1 and Stage 2.
 """
 
 import numpy as np
 import pandas as pd
-from fraud_detection.config import BAND_LOW, BAND_MEDIUM, BAND_HIGH, KNOWN_BRANDS
+from fraud_detection.config import BAND_CLEARED, BAND_LOW, BAND_MEDIUM, BAND_HIGH, KNOWN_BRANDS
 from fraud_detection.utils import _hour
 
 # Define all fraud detection rules with their conditions and delta adjustments
@@ -50,12 +51,15 @@ def apply_rules(cal_prob, txn):
 
 def risk_band(s):
     """
-    Map risk score to risk band (LOW, MEDIUM, HIGH, CRITICAL).
-    Bands determine disposition guidance and tool chain.
+    Map risk score to risk band (CLEARED, LOW, MEDIUM, HIGH, CRITICAL).
+    Unified thresholds across Stage 1 and Stage 2.
+    
+    Bands determine disposition guidance and tool chain depth.
     """
-    if s < BAND_LOW:    return 'LOW'
-    if s < BAND_MEDIUM: return 'MEDIUM'
-    if s < BAND_HIGH:   return 'HIGH'
+    if s < BAND_CLEARED: return 'CLEARED'
+    if s < BAND_LOW:     return 'LOW'
+    if s < BAND_MEDIUM:  return 'MEDIUM'  
+    if s < BAND_HIGH:    return 'HIGH'
     return 'CRITICAL'
 
 def rec_action(band):
@@ -63,10 +67,14 @@ def rec_action(band):
     Map risk band to recommended action for LLM guidance.
     Encodes disposition and outreach philosophy per band.
     """
-    return {'LOW':      'accept — low risk, approve directly',
-            'MEDIUM':   'accept_1fa — approve after OTP/biometric (no further outreach)',
-            'HIGH':     'accept_and_alert or deny — check merchant type before deciding',
-            'CRITICAL': 'deny — block transaction, review outreach necessity'}[band]
+    actions = {
+        'CLEARED':  'accept — no risk signals detected, approve directly',
+        'LOW':      'accept — low risk, approve directly',
+        'MEDIUM':   'accept_1fa — approve after OTP/biometric (no further outreach)',
+        'HIGH':     'accept_and_alert or deny — check merchant type before deciding',
+        'CRITICAL': 'deny — block transaction, review outreach necessity'
+    }
+    return actions.get(band, 'review_manually — unknown band')
 
 def get_merchant_trust_tier(merchant_name: str, merchant_id: str = '') -> str:
     """

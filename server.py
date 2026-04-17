@@ -99,7 +99,7 @@ FIX-8: If get_customer_profile returns no records for a CRITICAL transaction, fa
 get_recent_txns on the card number alone before issuing final verdict. Do not skip it.
 
 Always end with add_case_note (3-5 lines, max 400 chars) + update_case_status.""",
-            inputSchema={"type":"object","properties":{"transaction":{"type":"object"}},"required":["transaction"]}),
+            inputSchema={"type":"object","properties":{"transaction":{"type":"object"},"stage_1_context":{"type":"object"}},"required":["transaction"]}),
 
         types.Tool(name="get_customer_profile", description="""STAGE 2 — Customer risk profile. Call for MEDIUM+ bands.
 Returns: transaction history, fraud rate, failure rate, same-amount repeat detection,

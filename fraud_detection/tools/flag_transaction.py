@@ -5,6 +5,7 @@ Returns CLEARED or FLAGGED with suggested tools for Stage 2.
 """
 
 from datetime import datetime
+import json
 import pandas as pd
 import numpy as np
 from mcp import types
@@ -14,6 +15,7 @@ from fraud_detection.flags import compute_flags
 from fraud_detection.rules_engine import apply_rules, risk_band, rec_action
 from fraud_detection.feature_engineering import triage_score
 from fraud_detection.merchant_tracking import _record_merchant_flag, _merchant_flag_count
+from fraud_detection.tool_router import get_tools_for_flags
 
 async def flag_transaction(args):
     """
@@ -66,21 +68,41 @@ async def flag_transaction(args):
     if txn.get('f_frictionless_suspicious'):
         frictionless_warn = '\n  Frictionless bypass: frictionless_success + disposable/new-account detected [!]'
 
-    # FIX-5: build suggested_tools — get_merchant_onboarding always included
-    suggested = []
+    # FIX-5: build suggested_tools using new centralized router — get_merchant_onboarding always included
+    flags_fired = [k for k in txn.keys() if k.startswith('f_') and txn.get(k)]
+    
+    # Get tools from router (structured)
+    suggested_tools = get_tools_for_flags(flags_fired, txn.get('merchantFraudRate', 0.0))
+    
+    # Always include score_transaction as first step if flagged
     if flagged:
-        suggested.append("score_transaction")
-        if txn.get('f_disposable_email') or txn.get('f_new_account_high_value') or txn.get('f_frictionless_suspicious'):
-            suggested.append("get_customer_profile")
-        if txn.get('f_triple_country_mismatch') or txn.get('f_ip_issuer_mismatch'):
-            suggested.append("get_ip_intelligence")
-        if float(txn.get('merchantFraudRate',0)) > 0.05 or merchant_recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD:
-            suggested.append("get_merchant_risk")
-        if txn.get('f_api_channel'):
-            suggested.append("get_device_assoc")
-        # FIX-5: get_merchant_onboarding always in the chain
-        suggested.append("get_merchant_onboarding")
-        suggested += ["add_case_note","update_case_status"]
+        suggested_tools.insert(0, {
+            'tool': 'score_transaction',
+            'priority': 0,
+            'reason': 'Full ML scoring with velocity features',
+            'source': 'mandatory_stage2'
+        })
+    
+    # STRUCTURED CONTEXT for Stage 2 (new addition)
+    stage_1_context = {
+        'transaction_id': txn.get('transaction_id', 'unknown'),
+        'status': 'FLAGGED' if flagged else 'CLEARED',
+        'triage_score': round(score, 4),
+        'ml_probability_raw': round(ml_prob, 4),
+        'calibrated_probability': round(cal_prob, 4),
+        'flags_fired': flags_fired,
+        'rules_fired': fired,
+        'merchant_recurrence_count': merchant_recurrence_count,
+        'suggested_tools': suggested_tools,
+        'next_step': 'score_transaction' if flagged else 'update_case_status',
+        'carries_forward': {
+            'flags_fired': flags_fired,
+            'rules_fired': fired,
+            'triage_score': round(score, 4),
+            'merchant_recurrence_count': merchant_recurrence_count,
+            'note': 'Stage 2 should use these precomputed values to avoid re-computation'
+        }
+    }
 
     signals = [k.replace('f_','').replace('_',' ') for k in
                ['f_triple_country_mismatch','f_threeds_failed','f_disposable_email',
@@ -90,6 +112,9 @@ async def flag_transaction(args):
 
     dc_line = f"\n  Datacenter IP    : YES{dc_source}" if txn.get('f_datacenter_ip') else ""
 
+    # Human-readable output + structured context
+    suggested_text = ' → '.join([t['tool'] for t in suggested_tools]) if suggested_tools else 'none'
+    
     out = f"""TRIAGE GATE RESULT  [STAGE 1]
 ==============================
 Outcome              : {'FLAGGED 🚨' if flagged else 'CLEARED ✅'}
@@ -103,11 +128,14 @@ RULES FIRED ({len(fired)})
 STATIC RISK SIGNALS ({len(signals)})
   {', '.join(signals) if signals else 'none'}
 
-SUGGESTED STAGE 2 TOOLS
-  {' → '.join(suggested) if suggested else 'none — case is CLEARED, call update_case_status only'}
+SUGGESTED STAGE 2 TOOLS (Structured routing)
+  {suggested_text if suggested_tools else 'none — case is CLEARED, call update_case_status only'}
 
 NEXT STEP
   {'Proceed to Stage 2. Call score_transaction next.' if flagged else "Auto-close. Call update_case_status(status='auto_cleared'). No other tools needed."}
+
+[STRUCTURED CONTEXT FOR STAGE 2]
+{json.dumps(stage_1_context, indent=2, default=str)}
 ==============================
 NOTE: Velocity/frequency features are 0 at this stage (no DB). Stage 2 score_transaction
 recomputes with full DB-backed features and may produce a different final score."""
