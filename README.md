@@ -1,4 +1,4 @@
-# Agentic Fraud Detection & Risk Management System
+# Agentic Fraud Detection & Risk Management System 
 
 A modular, AI-powered fraud detection system built with an agentic architecture. Combines machine learning models, business rules, and intelligent tool orchestration to investigate and score transactions in real-time.
 
