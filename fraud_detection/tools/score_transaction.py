@@ -19,7 +19,7 @@ from fraud_detection.config import BAND_LOW, BAND_MEDIUM, BAND_HIGH, BAND_CLEARE
 from fraud_detection.feature_engineering import build_feature_vector, shap_top5
 from fraud_detection.rules_engine import apply_rules, risk_band, rec_action
 from fraud_detection.utils import get_db
-from fraud_detection.merchant_tracking import _merchant_flag_count
+from fraud_detection.merchant_tracking import get_merchant_flag_count, record_merchant_flag
 from fraud_detection.tool_router import get_tools_for_band, get_tools_for_shap_features, dedupe_and_prioritize, BAND_TOOL_MAPPING
 
 async def score_transaction(args):
@@ -83,8 +83,8 @@ NEXT STEP
         mfr = float(txn.get('merchantFraudRate',0))
         merchant_id = txn.get('merchant_id','')
 
-        # FIX-6: check recurrence at Stage 2 as well
-        recurrence_count = _merchant_flag_count(merchant_id)
+        # FIX-6: check recurrence at Stage 2 as well (now DB-backed)
+        recurrence_count = get_merchant_flag_count(merchant_id)
         recurrence_note = (
             f"\n  ⚠️  Merchant recurrence: {recurrence_count} CRITICAL flags in {MERCHANT_RECURRENCE_WINDOW_H}h — call get_merchant_risk."
             if recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD else ""

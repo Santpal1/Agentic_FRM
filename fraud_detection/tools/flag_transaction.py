@@ -14,7 +14,7 @@ from fraud_detection.config import TRIAGE_THRESHOLD, CASE_NOTE_MAX_CHARS, MERCHA
 from fraud_detection.flags import compute_flags
 from fraud_detection.rules_engine import apply_rules, risk_band, rec_action
 from fraud_detection.feature_engineering import triage_score
-from fraud_detection.merchant_tracking import _record_merchant_flag, _merchant_flag_count
+from fraud_detection.merchant_tracking import record_merchant_flag, get_merchant_flag_count
 from fraud_detection.tool_router import get_tools_for_flags
 
 async def flag_transaction(args):
@@ -41,13 +41,19 @@ async def flag_transaction(args):
     score, fired = apply_rules(cal_prob, txn)
     flagged = score >= TRIAGE_THRESHOLD
 
-    # FIX-6: record CRITICAL flag and check merchant recurrence
+    # FIX-6: record CRITICAL flag and check merchant recurrence (now DB-backed)
     merchant_id   = txn.get('merchant_id', '')
     merchant_name = txn.get('merchant_name', '')
+    transaction_id = txn.get('transaction_id', '')
     merchant_recurrence_count = 0
     merchant_recurrence_warn  = ''
     if flagged:
-        merchant_recurrence_count = _record_merchant_flag(merchant_id)
+        merchant_recurrence_count = record_merchant_flag(
+            merchant_id, 
+            transaction_id=transaction_id,
+            merchant_name=merchant_name,
+            risk_band='FLAGGED'
+        )
         if merchant_recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD:
             merchant_recurrence_warn = (
                 f"\n⚠️  MERCHANT RECURRENCE ALERT: {merchant_name or merchant_id} has been flagged "

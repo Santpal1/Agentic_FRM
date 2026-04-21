@@ -150,6 +150,90 @@ CREATE TABLE IF NOT EXISTS audit_log (
     INDEX idx_case (case_id),
     INDEX idx_time (event_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+""",
+
+'merchant_recurrence': """
+CREATE TABLE IF NOT EXISTS merchant_recurrence (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    merchant_id         VARCHAR(100) NOT NULL,
+    merchant_name       VARCHAR(255),
+    flagged_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    transaction_id      VARCHAR(32),
+    risk_band           VARCHAR(20),
+    reason              TEXT,
+    INDEX idx_merchant_window (merchant_id, flagged_at),
+    INDEX idx_created (flagged_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+""",
+
+'feedback_log': """
+CREATE TABLE IF NOT EXISTS feedback_log (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    transaction_id      VARCHAR(32) NOT NULL,
+    case_id             VARCHAR(32),
+    feedback_type       VARCHAR(50) NOT NULL,
+    feedback_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ground_truth        VARCHAR(20),
+    system_decision     VARCHAR(20),
+    correct_prediction  TINYINT,
+    rule_triggered      VARCHAR(100),
+    confidence_score    DECIMAL(6,4),
+    analyst_notes       TEXT,
+    INDEX idx_txn (transaction_id),
+    INDEX idx_case (case_id),
+    INDEX idx_feedback_type (feedback_type),
+    INDEX idx_date (feedback_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+""",
+
+'transaction_baseline': """
+CREATE TABLE IF NOT EXISTS transaction_baseline (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    card_number         VARCHAR(20) NOT NULL UNIQUE,
+    email               VARCHAR(120),
+    device_id           VARCHAR(64),
+    avg_transaction_amt DECIMAL(14,2),
+    median_transaction_amt DECIMAL(14,2),
+    stddev_amount       DECIMAL(14,2),
+    typical_merchants   TEXT,
+    typical_categories  TEXT,
+    typical_countries   TEXT,
+    typical_hours       TEXT,
+    typical_devices     INT,
+    typical_ips         INT,
+    avg_daily_count     DECIMAL(6,2),
+    max_daily_count     INT,
+    account_age_days    INT,
+    last_computed       TIMESTAMP,
+    txn_count_used      INT,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_card (card_number),
+    INDEX idx_email (email),
+    INDEX idx_device (device_id),
+    INDEX idx_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+""",
+
+'velocity_patterns': """
+CREATE TABLE IF NOT EXISTS velocity_patterns (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    card_number         VARCHAR(20),
+    device_id           VARCHAR(64),
+    merchant_id         VARCHAR(100),
+    pattern_type        VARCHAR(30),
+    burst_count_5min    INT,
+    burst_count_1hr     INT,
+    sustained_velocity_24h INT,
+    geographic_countries INT,
+    detected_at         TIMESTAMP,
+    anomaly_score       DECIMAL(6,4),
+    INDEX idx_card (card_number),
+    INDEX idx_device (device_id),
+    INDEX idx_merchant (merchant_id),
+    INDEX idx_pattern (pattern_type),
+    INDEX idx_detected (detected_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 }
 

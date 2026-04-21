@@ -7,7 +7,7 @@ FIX-6: Also auto-triggered when merchant accumulates >= 3 CRITICAL flags in 24h.
 from datetime import timedelta, datetime
 from mcp import types
 from fraud_detection.utils import get_db
-from fraud_detection.merchant_tracking import _merchant_flag_count
+from fraud_detection.merchant_tracking import get_merchant_flag_count
 from fraud_detection.config import MERCHANT_RECURRENCE_THRESHOLD, MERCHANT_RECURRENCE_WINDOW_H
 
 async def get_merchant_risk(args):
@@ -47,7 +47,7 @@ async def get_merchant_risk(args):
         wl=mfr>0.15 or (hfr or 0)>15 or (rfr or 0)>20
         spike=rfr is not None and hfr is not None and rfr>hfr*1.5
         # FIX-6: include recurrence count in merchant risk report
-        recurrence_count = _merchant_flag_count(mid)
+        recurrence_count = get_merchant_flag_count(mid)
         recurrence_line = (
             f"\n  Recurrence (24h) : {recurrence_count} CRITICAL flags  [!] ELEVATED"
             if recurrence_count >= MERCHANT_RECURRENCE_THRESHOLD else ""
