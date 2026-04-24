@@ -1,0 +1,132 @@
+You are a fraud analyst. Investigate this transaction using the required available tools and give me a full case narrative with verdict and recommended action.
+
+{
+  "transaction_id": "VERIFY-LOW-001",
+  "purchase_date": "2026-04-10T11:15:00",
+  "purchase_amount": 620,
+  "amount_inr": 620,
+  "card_number": "4111000000000620",
+  "device_id": "web-browser-stable-ROH",
+  "emailId": "rohit.menon@gmail.com",
+  "ip": "103.21.58.12",
+  "ip_country_long": "India",
+  "issuerCountryCode": "IND",
+  "merchant_country": "IND",
+  "merchant_category": "grocery",
+  "merchant_id": "MID-BIGBASKET-001",
+  "merchant_name": "BigBasket",
+  "merchantFraudRate": 0.005,
+  "authenticationType": "challenge_success",
+  "deviceChannel": "WEB",
+  "merchantPageTxn": 1,
+  "account_age_minutes": 43800,
+  "ip_isp": "Jio Fiber",
+  "velocity_5min_count": 0,
+  "device_cards_24h": 1,
+  "email_cards_total": 1
+}
+
+
+
+
+
+
+
+
+You are a fraud analyst. Investigate this transaction using the required available tools and give me a full case narrative with verdict and recommended action.
+
+{
+  "transaction_id": "VERIFY-MED-001",
+  "purchase_date": "2026-04-10T09:05:00",
+  "purchase_amount": 4200,
+  "amount_inr": 4200,
+  "card_number": "5218100000004200",
+  "device_id": "web-dev-new-MED01",
+  "emailId": "deal.hunter99@yopmail.com",
+  "ip": "117.202.11.88",
+  "ip_country_long": "India",
+  "issuerCountryCode": "IND",
+  "merchant_country": "IND",
+  "merchant_category": "beauty_cosmetics",
+  "merchant_id": "MID-NYKAA-007",
+  "merchant_name": "Nykaa",
+  "merchantFraudRate": 0.011,
+  "authenticationType": "frictionless_success",
+  "deviceChannel": "WEB",
+  "merchantPageTxn": 1,
+  "account_age_minutes": 42,
+  "ip_isp": "BSNL Broadband",
+  "velocity_5min_count": 1,
+  "device_cards_24h": 1,
+  "email_cards_total": 2
+}
+
+
+
+
+
+
+
+
+You are a fraud analyst. Investigate this transaction using the required available tools and give me a full case narrative with verdict and recommended action.
+
+{
+  "transaction_id": "VERIFY-HIGH-001",
+  "purchase_date": "2026-04-10T02:47:00",
+  "purchase_amount": 38500,
+  "amount_inr": 38500,
+  "card_number": "4532120000038500",
+  "device_id": "web-dev-HIGH01",
+  "emailId": "priya.sharma91@gmail.com",
+  "ip": "49.36.202.11",
+  "ip_country_long": "India",
+  "issuerCountryCode": "IND",
+  "merchant_country": "ARE",
+  "merchant_category": "luxury_retail",
+  "merchant_id": "MID-LUXE-AE-012",
+  "merchant_name": "GoldSouk Dubai",
+  "merchantFraudRate": 0.085,
+  "authenticationType": "attempted_not_authenticated",
+  "deviceChannel": "WEB",
+  "merchantPageTxn": 1,
+  "account_age_minutes": 18720,
+  "ip_isp": "Airtel 4G",
+  "velocity_5min_count": 2,
+  "device_cards_24h": 3,
+  "email_cards_total": 3
+}
+
+
+
+
+
+
+
+
+You are a fraud analyst. Investigate this transaction using the required available tools and give me a full case narrative with verdict and recommended action.
+
+{
+  "transaction_id": "VERIFY-CRIT-001",
+  "purchase_date": "2026-04-10T03:55:00",
+  "purchase_amount": 89000,
+  "amount_inr": 89000,
+  "card_number": "5218900000089001",
+  "device_id": "api-bot-device-CRIT01",
+  "emailId": "flash.sale88@tempinbox.com",
+  "ip": "185.220.102.8",
+  "ip_country_long": "United Kingdom",
+  "issuerCountryCode": "IND",
+  "merchant_country": "SGP",
+  "merchant_category": "digital_goods",
+  "merchant_id": "MID-UNKNOWN-SG-099",
+  "merchant_name": "QuickDigital SG",
+  "merchantFraudRate": 0.21,
+  "authenticationType": "not_attempted",
+  "deviceChannel": "API",
+  "merchantPageTxn": 0,
+  "account_age_minutes": 6,
+  "ip_isp": "Tor Exit Node",
+  "velocity_5min_count": 4,
+  "device_cards_24h": 9,
+  "email_cards_total": 12
+}
